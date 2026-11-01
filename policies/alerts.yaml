@@ -1,0 +1,17 @@
+- id: alert_page
+  role: gating
+  kind: noul
+  question: Does this alert indicate an ongoing failure affecting users that requires waking the on-call engineer now?
+  criteria:
+    "true": Users are affected right now (elevated error rate or latency on a user-facing service).
+    "false": No user impact (duplicate, already-known incident, or a non-user-facing signal).
+  thresholds: { yes_if_above: 0.6, no_if_below: 0.05 }   # compared against CALIBRATED probabilities
+  fallback: [llm]          # real-time path: no human queue
+  fail_mode: closed
+  fail_decision: true      # when unsure or broken, page anyway
+- id: alert_severity
+  role: ranking
+  kind: score
+  question: How severe is this alert?
+  criteria: [informational, minor, some users affected, many users affected, full outage]
+  fallback: [llm]

@@ -1,0 +1,28 @@
+id: ci_failure_class
+role: routing
+kind: choice
+question: >-
+  What is the main cause of this CI failure? Use the precomputed facts: whether the stack trace
+  overlaps the changed files, the test's recent pass rate on main, the rerun result, and infra signals.
+criteria:
+  code_bug: The change under test broke something (overlapping files, deterministic assertion or compile error).
+  flaky_test: The test fails intermittently regardless of the change (low pass rate on main, rerun passed, error seen on main before).
+  environment: Misconfigured CI environment (missing secret or env var, wrong version, bad path).
+  infrastructure: Runner, network, registry or disk problems (timeouts, DNS, rate limits, no space, OOM).
+  unknown: The facts do not support any category.
+thresholds:
+  accept_if_above: 0.7
+  option_thresholds: { flaky_test: 0.85 }   # flaky triggers an automatic rerun, so be stricter
+escalate_options: [unknown]
+fallback: [llm, human]
+fail_mode: open
+rules:
+  - regex: "No space left on device|ENOSPC"
+    field: error_excerpt
+    answer: infrastructure
+  - regex: "interrupted the EC2 Spot instance"
+    field: first_error_line
+    answer: infrastructure
+  - regex: "The runner has received a shutdown signal|lost communication with the server"
+    field: error_excerpt
+    answer: infrastructure
