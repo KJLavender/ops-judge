@@ -30,7 +30,7 @@ RuleJudge (regex) ─▶ JevJudge (System One model) ─▶ LLMJudge ─▶ Huma
 
 ## Demo
 
-- **Case explorer** (`docs/index.html`, GitHub Pages ready, no backend): all 103 real failures; for each one the facts the judges saw, every model's probabilities, the cascade path, and what actually happened. Rebuild with `python scripts/build_site.py`.
+- **Case explorer** — live at **https://kjlavender.github.io/ops-judge/** (`docs/index.html`, no backend): all 103 real failures; for each one the facts the judges saw, every model's probabilities, the cascade path, and what actually happened. Rebuild with `python scripts/build_site.py`.
 - **Live triage** of any public GitHub Actions run:
 
 ```bash

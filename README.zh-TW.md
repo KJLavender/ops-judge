@@ -30,7 +30,7 @@ RuleJudge（regex）─▶ JevJudge（System One 模型）─▶ LLMJudge ─▶
 
 ## Demo
 
-- **案例瀏覽頁**（`docs/index.html`，可直接放 GitHub Pages，不需要後端）：103 筆真實失敗，每一筆都能看到判斷器看到的事實、每個模型的機率、串接路徑，以及實際結果。用 `python scripts/build_site.py` 重新產生。
+- **案例瀏覽頁**：**https://kjlavender.github.io/ops-judge/**（`docs/index.html`，不需要後端）：103 筆真實失敗，每一筆都能看到判斷器看到的事實、每個模型的機率、串接路徑，以及實際結果。用 `python scripts/build_site.py` 重新產生。
 - **現場分析**任何公開 repo 的 GitHub Actions run：
 
 ```bash
