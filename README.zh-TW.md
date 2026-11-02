@@ -2,107 +2,145 @@
 
 [English](README.md) | **繁體中文**
 
-給維運用的判斷層，信心經過校準、每次決策都可稽核。用在兩件事：**CI 失敗分類**和**告警降噪**。
+CI 的 job 紅了，總得有人去搞清楚：是這次的修改弄壞的，還是偶發的、重跑就會好？ops-judge 負責做這個判斷：該重跑、該找人看，還是該交給修程式的工具。它自己不改程式，也不開 PR。
 
-多數 CI／告警 triage bot 會把每個事件都丟給 LLM。ops-judge 先用便宜、毫秒級的判斷器處理，只有灰色地帶才往上送：
+它會先試便宜的方法。regex 就看得出磁碟滿了；在自己電腦上跑的小模型，常常就看得出是 npm registry 掛了。只有看不清楚的才交給 LLM，LLM 也沒把握的再交給人。
 
-```
-RuleJudge（regex）─▶ JevJudge（System One 模型）─▶ LLMJudge ─▶ HumanQueue
-```
+180 筆評估案例都可以在這裡逐筆看：https://kjlavender.github.io/ops-judge/
 
-- 每一層只把**還沒決定的問題**合成**一次請求**送出。
-- 比對閾值前，先依（policy, 後端）**校準**信心。
-- 每個決策都寫進 **SQLite 稽核紀錄**：輸入雜湊、各層答案、延遲、成本、走了哪條路。
-- 人工標註會回收成校準和訓練資料。
+## 實際長什麼樣子
 
-## 它是什麼、不是什麼
-
-**ops-judge 是「判斷員」，不是「修復者」。** 它回答「這次 CI 失敗是程式錯、環境問題，還是偶發？該重跑、找人，還是交給修復 agent？」，但不會自己改程式或開 PR。
-
-| 角色 | 例子 | 負責什麼 |
-|---|---|---|
-| **判斷員**（本專案） | ops-judge | 便宜、可稽核地判斷失敗原因和處理方向 |
-| 工作流程框架 | GitHub Agentic Workflows | 何時啟動 AI、允許它做哪些動作 |
-| 修復者 | Copilot coding agent、自動修復 CI 的 agent | 讀錯誤、改程式、跑測試、開 PR |
-
-三者是搭配關係，不是競爭關係。分診先擋掉大多數「重跑就好」的失敗，修復 agent 才不會白白花成本去修根本沒壞的東西：
+指定任何一個公開的 GitHub Actions run 就能分析。下面這個 run 第一次失敗、重跑後通過，ops-judge 只看得到第一次的資料。
 
 ```
-CI 失敗 ─▶ ops-judge 判斷原因與處理方向
-              ├─ 暫時性 ─▶ 自動重跑
-              ├─ 環境／基礎設施 ─▶ 通知平台團隊
-              ├─ 程式錯誤 ─▶ 交給修復 agent ─▶ 重跑測試、人工審查
-              └─ 不確定 ─▶ 人工佇列
+$ ops-judge triage https://github.com/sveltejs/kit/actions/runs/40762220138
+
+▶ sveltejs/kit  run 40762220138  ·  bun
+
+1. Facts (precomputed, 422 log lines → 29-line excerpt)
+  first error        Error: Process from config.webServer was not able to start. Exit code: 1
+  touches PR files   False
+  main history       pass rate 90% over 29 runs · 3 failures, 1 fixed by rerun
+  error seen on main True
+
+2. Cascade
+  rule   no answer
+  jev    skipped: no TYPESAFE_API_KEY and no --jev URL
+  llm    code_bug        ██████·············· 0.30  escalate
+         flaky_test 0.25   unknown 0.23
+  human  no answer → queued for review (#3)
+
+3. Decision
+  queued  by -  ·  P(rerun fixes it) 0.27  ·  5.3s judging  ·  $0.0110
+  action: needs_review — undecided (queued); waiting for a human
+  what actually happened: attempt 2 concluded success (the decision above did not see this)
 ```
 
-**目前能做到哪裡**（誠實版）：
+LLM 沒把握（最高只有 0.30），所以它沒有硬猜，而是交給人。實際上重跑就好了。門檻設低一點就能接住這一筆，至於門檻要怎麼設，正是下面評估主要在處理的問題。
 
-- **已經有**：CI log 前處理、分層判斷、校準、稽核紀錄、人工佇列、評估工具，以及分析任何公開 GitHub Actions run 的命令（`ops-judge triage`）。
-- **還沒接上**：重跑、PR 留言、通知的決策邏輯已經寫好，但還沒有串接 GitHub 實際執行這些動作；告警降噪還在規劃；Jev 雲端版等待 API key。
-- 所以它現在是**可試用、有測試、有真實資料評估的判斷層**，不是已上線的自動修復 CI 機器人。
+## 怎麼判斷
 
-## 進度
+```
+規則（regex）→ decision model（本機的 Kev-4B 或 Jev）→ LLM → 人工佇列
+```
 
-| 部分 | 狀態 |
+每一層回傳的都是每個答案的機率，不只是一個標籤。門檻寫在 YAML（`policies/ci.yaml`）：
+
+- `flaky_test` 要 0.85 才採用，因為它會觸發自動重跑
+- `unknown` 一律往上一層送
+- fork PR 永遠不自動重跑，因為任何人都能在 fork 的 log 裡塞文字
+
+每個決策都會寫進 SQLite 稽核紀錄，包含每一層的答案、花了多久、花了多少錢。
+
+模型不會直接看三千行的原始 log。前處理會做三件事：
+
+- 在失敗的步驟截斷 log，後面都是 cleanup 雜訊
+- 保留 GitHub 的 `##[error]` 標註
+- 先把事實算好：錯誤堆疊有沒有碰到這個 PR 改的檔案、這個 job 前兩週在 `main` 上失敗過幾次、在那邊重跑有沒有救回來
+
+小模型不太會數數、也不太會比較日期，所以直接給它這些問題的答案，而不是原始資料。
+
+## 有用嗎？
+
+我拿 GitHub 自己的重跑紀錄當答案：一個 job 失敗後，有人按了重跑，如果過了，就代表重跑可以解決；如果又失敗，就代表不行。這樣從 8 個專案收到 316 個失敗的 job，去重後剩 180 題，專案包括 airflow、deno、sveltejs/kit、vue、cpython、ruff、TypeScript、transformers。判斷時只看得到重跑之前就存在的資料。
+
+| | 準確率 |
 |---|---|
-| `judge_core`：四個後端、YAML policy、串接、稽核紀錄、人工佇列 | 完成 |
-| Demo：案例瀏覽頁（`docs/index.html`）與 `ops-judge triage <run 網址>` | 完成 |
-| 校準（isotonic／Platt）與評估（閾值掃描、ECE、含錯誤相關性的 compare、learning curve） | 完成 |
-| CI 前處理：清理 log、擷取錯誤段落、堆疊與修改檔案交集、基礎設施／環境訊號、Drain3 模板 | 完成 |
-| CI 動作：重跑／留言／通知；fork PR 不自動重跑；重跑仍失敗時 flaky 改判 code_bug | 完成（只有邏輯，尚未接上 GitHub） |
-| 真實資料評估（`collect_reruns.py`、`collect_history.py`、`collect_context.py`、`build_dataset.py`、`eval_reruns.py`、`experiments.py`） | 8 個專案 316 筆失敗 → 180 題；全部重跑 77.2%、LLM 校準後 82.8%（把握 85% 以上才答時 90%）、本機 Kev-4B 80.6%（見 `plans/01-ops-judge-plan.md` 第 11.3 節） |
-| Jev 實測 | 等 API key（`TYPESAFE_API_KEY`） |
-| 告警流程（Alertmanager webhook、K8s + Chaos Mesh） | 規劃中（見 `plans/01-ops-judge-plan.md`） |
+| 一律回答「重跑」 | 77.2% |
+| LLM，直接用它給的機率 | 67.2% |
+| LLM，校準後 | 82.8% |
+| Kev-4B（在自己電腦上跑），校準後 | 80.6% |
+| LLM 校準後，把握 ≥ 85% 才回答 | 處理 48% 的失敗、答對 89.5%，其餘交給人 |
 
-## Demo
+有三件事出乎我意料：
 
-- **案例瀏覽頁**：**https://kjlavender.github.io/ops-judge/**（`docs/index.html`，不需要後端）：180 筆真實失敗，每一筆都能看到判斷器看到的事實、每個模型的機率、串接路徑，以及實際結果。用 `python scripts/build_site.py` 重新產生。
-- **現場分析**任何公開 repo 的 GitHub Actions run：
+- **直接用 LLM 給的機率，比一律回答「重跑」還差。** 用已知結果去修正它的把握程度，再拿修正時沒看過的題目檢查，這是效果最大的一步：67% 變 83%。
+- **多給線索沒有幫助。** 加上失敗測試自己的歷史、其他分支有沒有同樣錯誤、GitHub 當時有沒有故障、錯誤是不是落在修改的程式行，AUROC 只從 0.722 變 0.733。把問題拆成兩個是非題，兩個模型反而都變差。
+- **值不值得跑，要看人的時間多貴。** 如果查一次失敗要 15 分鐘，「一律重跑」已經很接近最佳，模型只省約 4%；查一次 5 分鐘時省約 12%。在失敗原因比較雜的專案（airflow、sveltejs/kit、ruff）有幫助；幾乎都是偶發失敗的專案（deno、vue）就沒有加分。
 
-```bash
-ops-judge triage https://github.com/sveltejs/kit/actions/runs/40762220138
-ops-judge triage <run 網址> --jev http://127.0.0.1:8094/v1/systemone   # 加上本機 decision model 這一層
-ops-judge triage <run 網址> --no-history --json                         # 較快／輸出 JSON
+第一版的答案其實標錯了。我原本看「整個 run 重跑後有沒有過」，但一個 run 可能因為某個 job 一直紅，而另一個 job 其實重跑就好。改成看每個 job 自己最後一次的結果之後，修正了 20 題。完整的過程，包括沒成功的嘗試，都寫在 [`plans/01-ops-judge-plan.md`](plans/01-ops-judge-plan.md) 第 11 節。
+
+## 在整個流程中的位置
+
+ops-judge 負責分診，不負責修。它可以接在 Copilot coding agent，或 [AIOps-v2](https://github.com/KJLavender/AIOps-v2) 這類自動修復 agent 的前面：分診先過濾掉只需要重跑的失敗，修復 agent 只要處理真的壞掉的。
+
+```
+CI 失敗 → ops-judge
+           ├ 偶發     → 重跑
+           ├ 環境問題 → 通知平台團隊
+           ├ 程式錯誤 → 修復 agent → 測試、人工審查
+           └ 不確定   → 交給人
 ```
 
-會印出擷取的事實、每一層的答案（採用或往上送）、決策、預定動作；如果那個 run 後來有重跑，也會揭曉實際結果。
-
-## 快速開始
+## 怎麼跑
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest                       # 46 個測試，不連網
-python scripts/toy_eval.py             # 20 筆 CI 玩具資料 → examples/out/{sweep,calibration}.png、compare.json、audit.sqlite
-python scripts/collect_reruns.py owner/repo --pages 3   # 從 GitHub Actions 的重跑紀錄取得 flaky 標註（需要 gh 登入）
+python -m pytest                      # 46 個測試，不連網
+
+ops-judge triage <run 網址>            # 需要已登入的 gh CLI
+ops-judge triage <run 網址> --jev http://127.0.0.1:8094/v1/systemone   # 加上本機的 decision model
+ops-judge triage <run 網址> --no-history --no-context                  # 比較快
 ```
 
-## 後端與設定
+LLM 這一層呼叫本機的 `claude` CLI，走 Claude 訂閱，不需要 API key。
 
-| 後端 | 說明 | 環境變數 |
+decision model 這一層用的是 System One API，TypeSafe 雲端的 Jev 和 llama.cpp 的 `llama-server`（`/v1/systemone`）都支援。Kev-4B、Laya、Julia-1 就是用 `llama-server` 在本機跑的。
+
+| 環境變數 | 預設 | |
 |---|---|---|
-| `RuleJudge` | policy YAML 裡的 regex 規則，也可以另外註冊 Python 規則 | — |
-| `JevJudge` | `POST /v1/systemone`；非 ASCII 字元以 UTF-8 原文送出，不轉成 `\u` 跳脫 | `TYPESAFE_API_KEY`、`JEV_MODEL`（預設 `jev-latest`）、`JEV_BASE_URL` |
-| `LLMJudge` | 本機 `claude -p` CLI（走訂閱，不需 API key）；機率分布由模型自己回報，所以和其他後端一樣要校準 | `OPSJUDGE_LLM_MODEL`（預設 `claude-sonnet-5-5`）、`OPSJUDGE_LLM_EFFORT`（預設 `medium`） |
-| `HumanQueue` | SQLite 待審佇列；已經有標註的輸入直接回答 | — |
+| `TYPESAFE_API_KEY` | | 雲端 Jev 用；本機 llama-server 不需要 |
+| `JEV_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | |
+| `JEV_TIMEOUT` | `10` | 秒；只用 CPU 跑本機模型時要調大 |
+| `OPSJUDGE_LLM_MODEL` | `claude-sonnet-5-5` | |
+| `OPSJUDGE_LLM_EFFORT` | `medium` | |
 
-## Policy
+重現評估：
 
-見 `policies/ci.yaml` 和 `policies/alerts.yaml`。判斷一直沒有結果時，各角色的處理方式：
+```bash
+python scripts/collect_reruns.py apache/airflow denoland/deno ... --pages 30
+python scripts/collect_context.py && python scripts/collect_history.py && python scripts/collect_context.py
+python scripts/build_dataset.py data/reruns.jsonl
+python scripts/eval_reruns.py --judges llm,kev@http://127.0.0.1:8094/v1/systemone
+python scripts/experiments.py
+python scripts/build_site.py
+```
 
-| 角色 | 灰色地帶 | 所有層都失敗／仍不確定 |
-|---|---|---|
-| routing | 往上送，最後進人工佇列 | `unrouted`／進佇列 |
-| gating | 往上送；灰色答案絕不放行 | 採 `fail_decision`（例如照常叫人） |
-| ranking | 不設閾值，直接採用分數 | `unscored` |
-| extraction | 依用途設閾值 | `unprocessed` |
+## 還沒做的
 
-## 目錄結構
+- 重跑、PR 留言、通知這些動作已經會決定，但還沒有真的對 GitHub 執行。下一步是做成 GitHub Action。
+- 雲端的 Jev 還沒測過，因為還沒有 API key。目前用本機的 Kev-4B 代替。
+- 原本計畫裡的告警降噪那一半（Alertmanager、Kubernetes、Chaos Mesh）還沒開始。
+- 180 題不算多，而且少數幾個專案佔了大部分。
+
+## 目錄
 
 ```
-judge_core/   型別、policy、串接、store（稽核＋佇列）、校準、評估、judges/
-ops_judge/ci/ extract（log → 段落＋訊號）、facts（算好的 state）、templates（Drain3）、actions
-policies/     YAML policy
-scripts/      toy_eval.py、collect_reruns.py
-examples/     toy_ci.jsonl
-plans/        專案計畫
+judge_core/     各層判斷器（規則、Jev/System One、LLM、人工佇列）、policy、串接、稽核紀錄、校準、評估
+ops_judge/ci/   log 擷取、事實、額外線索、GitHub 存取、動作
+ops_judge/triage.py   CLI
+policies/       YAML policy
+scripts/        資料收集、評估、實驗、網頁產生
+site/, docs/    案例瀏覽頁的模板和產生出來的網頁
+plans/          計畫與筆記
 ```

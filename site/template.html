@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%232a78d6'/></svg>">
 <title>ops-judge · CI failure triage on real GitHub Actions data</title>
 <style>
   :root {
@@ -41,7 +42,7 @@
               border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
   button.tg[aria-pressed="true"] { color: var(--text-primary); border-color: var(--text-secondary); }
   .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 22px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); gap: 12px; margin-top: 22px; }
   .tile .v { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .tile .k { color: var(--text-secondary); font-size: 13px; }
   .pipeline { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
@@ -59,7 +60,15 @@
   .hbar .fill.base { background: var(--baseline); }
   .hbar .chance { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 1px dashed var(--text-muted); }
   .explorer { display: grid; grid-template-columns: 330px 1fr; gap: 14px; align-items: start; }
-  @media (max-width: 860px) { .explorer { grid-template-columns: 1fr; } }
+  /* Grid/flex children default to min-width:auto, so one long unwrapped log line widens the whole page. */
+  .explorer > *, .expgrid > *, .models > *, .tiles > * { min-width: 0; }
+  .tablewrap { overflow-x: auto; }
+  @media (max-width: 860px) { .explorer { grid-template-columns: 1fr; } .list { max-height: 360px; } }
+  @media (max-width: 600px) {
+    main { padding: 20px 12px 48px; } h1 { font-size: 24px; } .card { padding: 14px; }
+    .stage { flex-basis: 100%; } .pipeline .arrow { display: none; } .barcell { display: none; }
+    dl.facts { grid-template-columns: 1fr; } dl.facts dd { margin-bottom: 6px; }
+  }
   .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
   .filters input { flex: 1 1 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border);
                    background: var(--surface-1); color: var(--text-primary); font: inherit; font-size: 14px; }
@@ -79,7 +88,7 @@
   pre { background: var(--surface-2); border-radius: 8px; padding: 12px; font: 12px/1.45 var(--mono);
         overflow: auto; max-height: 360px; white-space: pre; }
   details summary { cursor: pointer; color: var(--text-secondary); font-size: 14px; }
-  .models { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .models { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); gap: 12px; }
   .model { background: var(--surface-2); border-radius: 8px; padding: 10px 12px; }
   .model .name { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
   .prow { display: grid; grid-template-columns: 96px 1fr 38px; gap: 6px; align-items: center; font-size: 12px; height: 20px; }
@@ -93,7 +102,7 @@
   .step .t { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
   .step.acc { border-color: var(--series-1); }
   .verdict { margin-top: 12px; font-size: 15px; }
-  .expgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+  .expgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 14px; }
   .expgrid h3 { margin-top: 0; color: var(--text-primary); }
   .expgrid p { font-size: 13px; color: var(--text-secondary); margin: 4px 0 10px; }
   #tip { position: fixed; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
@@ -128,7 +137,7 @@
   <h2 data-i18n="h_results"></h2>
   <div class="card">
     <p style="margin-top:0" data-i18n="results_q"></p>
-    <table id="methods"></table>
+    <div class="tablewrap"><table id="methods"></table></div>
     <p class="muted" style="font-size:13px;margin-bottom:0" data-i18n="results_note"></p>
   </div>
 
@@ -311,11 +320,11 @@ function renderExperiments() {
   const agree = Object.entries(X.agreement || {}).map(([k, v]) => row([esc(k), `${v.decided} (${pct(v.coverage)})`, pct(v.accuracy)])).join("");
   const repos = Object.entries(best.by_repo).map(([r, v]) => row([esc(r), v.n, pct(v.majority), pct(v.accuracy)])).join("");
   $("#exp").innerHTML = `<div class="expgrid">
-    <div class="card"><h3>${t.x_sel}</h3><p>${t.x_sel_p}</p><table>${head([t.x_th, t.x_ans, t.x_acc])}<tbody>${sel}</tbody></table></div>
+    <div class="card"><h3>${t.x_sel}</h3><p>${t.x_sel_p}</p><div class="tablewrap"><table>${head([t.x_th, t.x_ans, t.x_acc])}<tbody>${sel}</tbody></table></div></div>
     <div class="card"><h3>${t.x_cal}</h3><p>${t.x_cal_p}</p><table>${head([t.x_model, t.x_before, t.x_after])}<tbody>${cal}</tbody></table></div>
-    <div class="card"><h3>${t.x_cost}</h3><p>${t.x_cost_p}</p><table>${head([t.x_hc, t.x_human, t.x_rerun, t.x_ours, t.x_best])}<tbody>${cost}</tbody></table></div>
+    <div class="card"><h3>${t.x_cost}</h3><p>${t.x_cost_p}</p><div class="tablewrap"><table>${head([t.x_hc, t.x_human, t.x_rerun, t.x_ours, t.x_best])}<tbody>${cost}</tbody></table></div></div>
     ${agree ? `<div class="card"><h3>${t.x_agree}</h3><p>${t.x_agree_p}</p><table>${head([t.x_pair, t.x_dec, t.x_acc])}<tbody>${agree}</tbody></table></div>` : ""}
-    <div class="card"><h3>${t.x_clean}</h3><p>${t.x_clean_p} (${X.n_clean}/${X.n})</p><table>${head([t.x_repo, t.x_n, t.x_base, t.x_acc])}<tbody>${repos}</tbody></table></div>
+    <div class="card"><h3>${t.x_clean}</h3><p>${t.x_clean_p} (${X.n_clean}/${X.n})</p><div class="tablewrap"><table>${head([t.x_repo, t.x_n, t.x_base, t.x_acc])}<tbody>${repos}</tbody></table></div></div>
   </div>`;
 }
 
