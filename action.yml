@@ -1,0 +1,50 @@
+name: ops-judge
+description: Triage a failed GitHub Actions run (rerun / explain on the PR / notify) with a calibrated rule → decision model → LLM → human cascade.
+branding:
+  icon: activity
+  color: blue
+
+inputs:
+  run-url:
+    description: URL of the failed run. Defaults to the run that triggered this workflow_run event.
+    default: ${{ github.event.workflow_run.html_url }}
+  claude-oauth-token:
+    description: Token from `claude setup-token` (Claude subscription). Enables the LLM tier; without it only rules decide and the rest is sent to a person.
+    default: ""
+  typesafe-api-key:
+    description: TypeSafe API key. Enables the hosted Jev decision-model tier.
+    default: ""
+  notify-webhook:
+    description: Slack-compatible webhook for environment / infrastructure failures. Without it they go to the job summary.
+    default: ""
+  act:
+    description: Actually rerun / comment / notify. Set to "false" for a dry run.
+    default: "true"
+  extra-args:
+    description: Extra arguments for `ops-judge triage`, e.g. "--no-context".
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - name: Install ops-judge
+      shell: bash
+      run: pip install --quiet -e "$GITHUB_ACTION_PATH"
+    - name: Install Claude Code CLI (LLM tier)
+      if: inputs.claude-oauth-token != ''
+      shell: bash
+      run: npm install --silent -g @anthropic-ai/claude-code
+    - name: Triage
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-oauth-token }}
+        TYPESAFE_API_KEY: ${{ inputs.typesafe-api-key }}
+        OPSJUDGE_NOTIFY_WEBHOOK: ${{ inputs.notify-webhook }}
+        RUN_URL: ${{ inputs.run-url }}
+        MODE: ${{ inputs.act == 'true' && '--act' || '--dry-run' }}
+        NO_COLOR: "1"
+      run: ops-judge triage "$RUN_URL" $MODE ${{ inputs.extra-args }} | tee -a "$GITHUB_STEP_SUMMARY"

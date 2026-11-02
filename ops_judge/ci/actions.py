@@ -11,6 +11,7 @@ from judge_core.cascade import Decision
 class Action:
     kind: str     # rerun | comment_pr | notify_platform | needs_review | none
     reason: str
+    also_notify: bool = False  # tell the platform team as well (infrastructure that a rerun may fix)
 
 
 def plan_action(d: Decision, is_fork_pr: bool, already_rerun: bool) -> Action:
@@ -25,6 +26,9 @@ def plan_action(d: Decision, is_fork_pr: bool, already_rerun: bool) -> Action:
         return Action("rerun", f"flaky_test with confidence {d.confidence:.2f}")
     if cls == "code_bug":
         return Action("comment_pr", "code_bug: posting key error lines and overlapping files")
+    if cls == "infrastructure" and not is_fork_pr and not already_rerun:
+        # Runner loss, registry outages, spot reclaims: usually gone on the next attempt (see the rerun data).
+        return Action("rerun", "infrastructure: rerun and tell the platform team", also_notify=True)
     if cls in ("environment", "infrastructure"):
         return Action("notify_platform", f"{cls}: notify the platform team, do not ping the PR author")
     return Action("needs_review", f"unexpected class {cls!r}")

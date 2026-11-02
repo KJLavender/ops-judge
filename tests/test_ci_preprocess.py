@@ -72,7 +72,10 @@ def test_actions():
     assert plan_action(d("flaky_test"), is_fork_pr=False, already_rerun=False).kind == "rerun"
     assert plan_action(d("flaky_test"), is_fork_pr=True, already_rerun=False).kind == "comment_pr"
     assert plan_action(d("flaky_test"), is_fork_pr=False, already_rerun=True).kind == "comment_pr"
-    assert plan_action(d("infrastructure"), False, False).kind == "notify_platform"
+    infra = plan_action(d("infrastructure"), False, False)
+    assert (infra.kind, infra.also_notify) == ("rerun", True)
+    assert plan_action(d("infrastructure"), False, already_rerun=True).kind == "notify_platform"
+    assert plan_action(d("environment"), False, False).kind == "notify_platform"
     assert plan_action(d(None, status="queued"), False, False).kind == "needs_review"
     assert reclassify_after_rerun(d("flaky_test"), rerun_passed=False).decision == "code_bug"
     assert reclassify_after_rerun(d("flaky_test"), rerun_passed=True).decision == "flaky_test"

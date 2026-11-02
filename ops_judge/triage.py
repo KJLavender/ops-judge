@@ -25,6 +25,7 @@ from pathlib import Path
 from judge_core import Cascade, HumanQueue, JevJudge, LLMJudge, RuleJudge, Store, load_policies
 from judge_core.types import JudgeError, JudgeRequest, JudgeResult
 from ops_judge.ci.actions import plan_action
+from ops_judge.ci.executor import Context, execute, followup_after_rerun, pr_number
 from ops_judge.ci import context
 from ops_judge.ci.extract import error_excerpt, failing_tests, stack_frames
 from ops_judge.ci.facts import CIFailure, build_state, first_error_line
@@ -143,6 +144,7 @@ def triage(args) -> list[dict]:
     incidents = [] if args.no_context else github_incidents()
     timings["fetch_run"] = time.perf_counter() - t0
 
+    (ROOT / "data").mkdir(exist_ok=True)  # fresh checkouts (e.g. the GitHub Action) have no data/ yet
     store = Store(ROOT / "data/triage.sqlite")
     cascade = build_cascade(args, store)
     results = []
@@ -172,10 +174,20 @@ def triage(args) -> list[dict]:
         d = cascade.run(state, ["ci_failure_class"], context={"repo": repo, "run_id": run_id, "job": job["name"]})["ci_failure_class"]
         timings["judge"] = time.perf_counter() - t
         action = plan_action(d, is_fork_pr=is_fork, already_rerun=outcome is None and run.get("run_attempt", 1) > 1)
+        executed = None
+        if args.act or args.dry_run:
+            if outcome is None and run.get("run_attempt", 1) > 1:
+                # A later attempt failed too: if ops-judge called it flaky before, say it is a real problem now.
+                executed = followup_after_rerun(repo, run, job["name"], job["html_url"], dry_run=args.dry_run).as_dict()
+            else:
+                ctx = Context(repo=repo, run_id=run_id, run_attempt=run.get("run_attempt", 1), job=job["name"],
+                              job_url=job["html_url"], pr_number=pr_number(repo, run), decision=d.model_dump(),
+                              state=state, actual_outcome=outcome)
+                executed = execute(ctx, action, dry_run=args.dry_run).as_dict()
         results.append({"repo": repo, "run_id": run_id, "run_url": run["html_url"], "job": job["name"],
                         "job_url": job["html_url"], "is_fork_pr": is_fork, "log_lines": len(log.split("\n")),
                         "state": state, "decision": d.model_dump(), "action": vars(action), "timings_s": dict(timings),
-                        "actual_outcome": outcome})
+                        "actual_outcome": outcome, "executed": executed})
     return results
 
 
@@ -247,6 +259,11 @@ def show(r: dict) -> None:
           + f"  ·  {d['latency_ms'] / 1000:.1f}s judging  ·  ${d['cost_usd']:.4f}")
     a = r["action"]
     print(f"  action: {c(a['kind'], 'bold', 'green' if a['kind'] == 'rerun' else 'yellow')} — {a['reason']}")
+    if r.get("executed"):
+        for x in r["executed"]["done"]:
+            print(c(f"  ✓ {x}", "green"))
+        for x in r["executed"]["skipped"]:
+            print(c(f"  – {x}", "dim"))
     if r["actual_outcome"]:
         print(c(f"  what actually happened: {r['actual_outcome']} (the decision above did not see this)", "cyan"))
     tm = r["timings_s"]
@@ -264,6 +281,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-runs", type=int, default=30, help="main-branch runs to inspect for history")
     ap.add_argument("--max-jobs", type=int, default=3)
     ap.add_argument("--json", action="store_true", help="print JSON instead of the trace")
+    ap.add_argument("--act", action="store_true", help="carry out the action on GitHub (rerun / PR comment / notify)")
+    ap.add_argument("--dry-run", action="store_true", help="show what --act would do without doing it")
     args = ap.parse_args(argv)
     results = triage(args)
     if args.json:
