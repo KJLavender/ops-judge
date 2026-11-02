@@ -9,7 +9,7 @@ from ops_judge.ci.executor import Context, execute, followup_after_rerun, pr_num
 def gh_calls(monkeypatch):
     calls, comments = [], []
     monkeypatch.setattr(executor, "run_cmd", lambda cmd, dry_run: None if dry_run else calls.append(cmd))
-    monkeypatch.setattr(executor, "gh", lambda path, raw=False: [{"body": b} for b in comments])
+    monkeypatch.setattr(executor, "gh", lambda path, raw=False: [{"id": i, "body": b} for i, b in enumerate(comments)])
     monkeypatch.delenv("OPSJUDGE_NOTIFY_WEBHOOK", raising=False)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     return calls, comments
@@ -31,7 +31,17 @@ def test_rerun_then_comment_once(gh_calls):
     assert "`src/a.py`" in calls[1][-1] and len(out.done) == 2
     comments.append(calls[1][-1])  # the comment now exists on the PR
     out2 = execute(ctx(), Action("rerun", "flaky"))
-    assert len(calls) == 3 and any("already has the ops-judge note" in s for s in out2.skipped)
+    assert len(calls) == 3 and any("already has this note" in s for s in out2.skipped)
+
+
+def test_better_informed_triage_updates_the_note(gh_calls):
+    calls, comments = gh_calls
+    unsure = {"status": "queued", "decision": None, "confidence": None, "decided_by": None}
+    execute(ctx(decision=unsure), Action("needs_review", "?"))
+    comments.append(calls[-1][-1])
+    out = execute(ctx(), Action("rerun", "flaky"))
+    assert calls[-1][:4] == ["gh", "api", "-X", "PATCH"] and "issues/comments/0" in calls[-1][4]
+    assert "**flaky_test**" in calls[-1][-1] and "updated the note" in out.done[-1]
 
 
 def test_never_reruns_a_rerun_and_dry_run_does_nothing(gh_calls):
@@ -61,7 +71,9 @@ def test_followup_only_after_our_own_note(gh_calls):
     calls, comments = gh_calls
     run = {"id": 7, "pull_requests": [{"number": 3, "base": {"repo": {"url": "https://api.github.com/repos/o/r"}}}]}
     assert followup_after_rerun("o/r", run, "test", "u").done == []      # we never commented: stay quiet
-    comments.append("<!-- ops-judge:7:test --> flaky")
+    comments.append("<!-- ops-judge:7:test --> **code_bug**")
+    assert followup_after_rerun("o/r", run, "test", "u").done == []      # we never called it a flake
+    comments[0] = "<!-- ops-judge:7:test --> **flaky_test**"
     assert len(followup_after_rerun("o/r", run, "test", "u").done) == 1
     assert "failed again after the rerun" in calls[-1][-1]
 

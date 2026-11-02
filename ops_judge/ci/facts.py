@@ -38,6 +38,8 @@ def overlap(stack: list[str], changed: list[str]) -> list[str]:
     return hits
 
 
+PYTEST_E = re.compile(r"^E {2,}\S")
+
 # Marker lines that say "something failed" without saying what.
 GENERIC = re.compile(r"^Traceback \(most recent call last\)|##\[error\]Process completed with exit code|^FAILED$")
 
@@ -47,6 +49,11 @@ def first_error_line(excerpt: str, log: str | None = None) -> str:
         notes = extract.annotations(log)
         if notes:
             return notes[0][:300]
+    # pytest marks the actual exception with "E   "; the lines around it are echoed source code, whose string
+    # literals can look like errors themselves.
+    for line in excerpt.split("\n"):
+        if PYTEST_E.match(line):
+            return line.strip()[1:].strip()[:300]
     fallback = ""
     for line in excerpt.split("\n"):
         line = line.strip()

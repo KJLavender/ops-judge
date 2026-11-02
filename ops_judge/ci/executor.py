@@ -70,12 +70,16 @@ def comment_body(ctx: Context, action: Action) -> str:
     return "\n".join(lines)
 
 
-def already_commented(repo: str, pr: int, marker: str) -> bool:
+def find_comment(repo: str, pr: int, marker: str) -> dict | None:
     try:
         comments = gh(f"repos/{repo}/issues/{pr}/comments?per_page=100")
     except RuntimeError:
-        return False
-    return any(marker in (c.get("body") or "") for c in comments)
+        return None
+    return next((c for c in comments if marker in (c.get("body") or "")), None)
+
+
+def already_commented(repo: str, pr: int, marker: str) -> bool:
+    return find_comment(repo, pr, marker) is not None
 
 
 def run_cmd(cmd: list[str], dry_run: bool) -> None:
@@ -120,19 +124,25 @@ def execute(ctx: Context, action: Action, dry_run: bool = False) -> Outcome:
     if action.kind == "notify_platform" or action.also_notify:
         text = f"ops-judge: {ctx.repo} job `{ctx.job}` failed with an environment/infrastructure problem: " \
                f"{ctx.state.get('first_error_line', '')[:200]} ({ctx.job_url})"
-        out.done.append(tag + notify(ctx, text, dry_run))
+        result = notify(ctx, text, dry_run)
+        (out.skipped if result.startswith("no notify target") else out.done).append(tag + result)
 
     # Every outcome is explained on the PR (once), so the author knows what happened and why.
     if ctx.pr_number is None:
         out.skipped.append("comment: run is not attached to a pull request in this repo")
     else:
         marker = MARKER.format(run_id=ctx.run_id, job=ctx.job)
-        if already_commented(ctx.repo, ctx.pr_number, marker):
-            out.skipped.append(f"comment: PR #{ctx.pr_number} already has the ops-judge note for this job")
-        else:
-            body = comment_body(ctx, action)
+        body = comment_body(ctx, action)
+        existing = find_comment(ctx.repo, ctx.pr_number, marker)
+        if existing is None:
             run_cmd(["gh", "pr", "comment", str(ctx.pr_number), "-R", ctx.repo, "--body", body], dry_run)
             out.done.append(f"{tag}commented on PR #{ctx.pr_number}")
+        elif existing.get("body") == body:
+            out.skipped.append(f"comment: PR #{ctx.pr_number} already has this note")
+        else:
+            # One note per failed job, kept current: a later, better-informed triage edits it in place.
+            run_cmd(["gh", "api", "-X", "PATCH", f"repos/{ctx.repo}/issues/comments/{existing['id']}", "-f", f"body={body}"], dry_run)
+            out.done.append(f"{tag}updated the note on PR #{ctx.pr_number}")
     return out
 
 
@@ -144,7 +154,9 @@ def followup_after_rerun(repo: str, run: dict, job: str, job_url: str, dry_run: 
         return out
     marker = MARKER.format(run_id=run["id"], job=job)
     followup = MARKER.format(run_id=run["id"], job=job + ":followup")
-    if already_commented(repo, pr, marker) and not already_commented(repo, pr, followup):
+    note = find_comment(repo, pr, marker)
+    called_transient = bool(note) and any(f"**{c}**" in note["body"] for c in TRANSIENT)
+    if called_transient and not already_commented(repo, pr, followup):
         body = f"{followup}\n**ops-judge**: [`{job}`]({job_url}) failed again after the rerun, so this is probably " \
                f"not a flake. Treating it as a code problem."
         run_cmd(["gh", "pr", "comment", str(pr), "-R", repo, "--body", body], dry_run)

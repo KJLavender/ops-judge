@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import re
 import sys
 import time
@@ -112,7 +113,12 @@ def build_cascade(args, store: Store) -> Cascade:
         jev = JevJudge()
     else:
         jev = Skipped("jev", "no TYPESAFE_API_KEY and no --jev URL")
-    llm = Skipped("llm", "--no-llm") if args.no_llm else LLMJudge()
+    if args.no_llm:
+        llm = Skipped("llm", "--no-llm")
+    elif not shutil.which("claude"):
+        llm = Skipped("llm", "no claude CLI (in the GitHub Action: set the claude-oauth-token input)")
+    else:
+        llm = LLMJudge()
     return Cascade(policies, {"rule": RuleJudge.from_policies(policies), "jev": jev, "llm": llm,
                               "human": HumanQueue(store)}, store)
 

@@ -106,3 +106,15 @@ def test_signal_false_positives():
     assert extract.infra_signals("##[error]Process completed with exit code 137.") == ["sigkill"]
     assert "spot_interruption" in extract.infra_signals("##[error]AWS interrupted the EC2 Spot instance running this job.")
     assert "timeout" in extract.infra_signals("caused by: operation timed out")
+
+
+def test_pytest_E_line_beats_echoed_source():
+    log = "\n".join([
+        ">           raise ConnectionError(",
+        "                \"(Caused by NameResolutionError: Failed to resolve 'registry.example.org' \"",
+        "E           ConnectionError: HTTPSConnectionPool(host='registry.example.org', port=443): Max retries exceeded",
+        "tests/test_registry.py:14: ConnectionError",
+        "##[error]Process completed with exit code 1.",
+    ])
+    s = build_state(CIFailure(log=log, changed_files=[]))
+    assert s["first_error_line"].startswith("ConnectionError: HTTPSConnectionPool")
