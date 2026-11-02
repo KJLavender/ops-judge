@@ -80,7 +80,7 @@ def test_human_label_is_reused():
 
 
 def alert_cascade(jev, llm):
-    return Cascade(ALERTS, {"jev": jev, "llm": llm})
+    return Cascade(ALERTS, {"rule": RuleJudge.from_policies(ALERTS), "jev": jev, "llm": llm})
 
 
 def test_alert_questions_batched_into_one_request():
@@ -111,10 +111,11 @@ def test_calibration_changes_the_verdict():
     # Jev's noul is under-confident: raw 0.5 sits in the gray zone, calibrated it clears 0.6.
     jev = FakeJudge("jev", {"alert_page": Answer.noul(0.5)})
     llm = FakeJudge("llm", {"alert_page": Answer.noul(0.3)})
-    c = Cascade(ALERTS, {"jev": jev, "llm": llm}, calibrators={("alert_page", "jev"): PlattCalibrator(a=2.0, b=1.0)})
+    c = Cascade(ALERTS, {"rule": RuleJudge.from_policies(ALERTS), "jev": jev, "llm": llm}, calibrators={("alert_page", "jev"): PlattCalibrator(a=2.0, b=1.0)})
     d = c.run({"a": 1}, ["alert_page"])["alert_page"]
-    assert d.decided_by == "jev" and d.tiers[0]["calibrated"]
-    assert d.tiers[0]["raw"]["value"] == 0.5 and d.tiers[0]["answer"]["value"] > 0.6
+    jev_tier = next(t for t in d.tiers if t["judge"] == "jev")
+    assert d.decided_by == "jev" and jev_tier["calibrated"]
+    assert jev_tier["raw"]["value"] == 0.5 and jev_tier["answer"]["value"] > 0.6
 
 
 def test_missing_judge_rejected():

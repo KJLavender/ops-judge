@@ -165,6 +165,9 @@ def triage(args) -> list[dict]:
         state = build_state(CIFailure(log=log, changed_files=files, is_fork_pr=is_fork,
                                       main_history=main_hist, main_fixed_by_rerun=fixed), idx)
         state.pop("rerun_result")  # the decision is made before any rerun
+        if not main_hist:
+            for k in ("main_runs_considered", "main_pass_rate", "main_failures", "main_failures_fixed_by_rerun"):
+                state.pop(k, None)  # no history: absent beats a misleading null/zero (same as the dataset)
         tests = failing_tests(state["error_excerpt"])
         state["failing_tests"] = tests[:5]
         if not args.no_history and tests:
@@ -219,7 +222,7 @@ def show(r: dict) -> None:
     print(c("\n1. Facts (precomputed, ", "bold") + c(f"{r['log_lines']} log lines → {len(s['error_excerpt'].splitlines())}-line excerpt", "dim") + c(")", "bold"))
     print(f"  first error        {c(s['first_error_line'][:110] or '(none)', 'yellow')}")
     print(f"  touches PR files   {s['stack_overlaps_changed_files']}  {', '.join(s['overlapping_files'][:3])}")
-    if "main_pass_rate" in s:
+    if s.get("main_pass_rate") is not None:
         print(f"  main history       pass rate {s['main_pass_rate']:.0%} over {s['main_runs_considered']} runs · "
               f"{s['main_failures']} failures, {s['main_failures_fixed_by_rerun']} fixed by rerun")
     if "error_seen_on_main_recently" in s:

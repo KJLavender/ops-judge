@@ -1,0 +1,196 @@
+# Alert lab for ops-judge: a tiny user-facing "shop", synthetic traffic, a background worker that users never
+# see, and alert rules. Faults are injected at runtime (scripts/alert_lab.py); nothing here touches other namespaces.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ops-judge-lab
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-app
+  namespace: ops-judge-lab
+data:
+  app.py: |
+    # Stdlib-only HTTP service with Prometheus metrics and runtime fault switches on /admin.
+    import json, random, threading, time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]
+    lock = threading.Lock()
+    counts = {"200": 0, "500": 0}
+    hist = [0] * (len(BUCKETS) + 1)
+    total_sum = 0.0
+    faults = {"error_rate": 0.0, "latency_ms": 0, "memory_mb": 0}
+    hog = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+
+        def do_GET(self):
+            global total_sum, hog
+            url = urlparse(self.path)
+            if url.path == "/admin":
+                for k, v in parse_qs(url.query).items():
+                    faults[k] = float(v[0])
+                hog = [bytearray(1024 * 1024) for _ in range(int(faults["memory_mb"]))]
+                return self.reply(200, json.dumps(faults))
+            if url.path == "/metrics":
+                lines = ["# TYPE http_requests_total counter"]
+                lines += [f'http_requests_total{{code="{c}"}} {n}' for c, n in counts.items()]
+                lines.append("# TYPE http_request_duration_seconds histogram")
+                acc = 0
+                for b, n in zip(BUCKETS + ["+Inf"], hist):
+                    acc += n
+                    lines.append(f'http_request_duration_seconds_bucket{{le="{b}"}} {acc}')
+                lines.append(f"http_request_duration_seconds_sum {total_sum}")
+                lines.append(f"http_request_duration_seconds_count {acc}")
+                return self.reply(200, "\n".join(lines) + "\n")
+            t0 = time.time()
+            time.sleep(0.01 + faults["latency_ms"] / 1000 * random.uniform(0.8, 1.2))
+            code = "500" if random.random() < faults["error_rate"] else "200"
+            dt = time.time() - t0
+            with lock:
+                counts[code] += 1
+                total_sum += dt
+                hist[next((i for i, b in enumerate(BUCKETS) if dt <= b), len(BUCKETS))] += 1
+            self.reply(int(code), "ok" if code == "200" else "error")
+
+        def reply(self, code, body):
+            data = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(data)))
+            # Prometheus 3 rejects scrapes without a Content-Type.
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.end_headers()
+            self.wfile.write(data)
+
+    ThreadingHTTPServer(("", 8080), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop
+  namespace: ops-judge-lab
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector: {matchLabels: {app: shop}}
+  template:
+    metadata: {labels: {app: shop}}
+    spec:
+      containers:
+        - name: shop
+          image: python:3.11-alpine
+          command: ["python", "/app/app.py"]
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /metrics, port: 8080}, periodSeconds: 5}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 300m, memory: 256Mi}
+          volumeMounts: [{name: app, mountPath: /app}]
+      volumes: [{name: app, configMap: {name: shop-app}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop
+  namespace: ops-judge-lab
+  labels: {app: shop}
+spec:
+  selector: {app: shop}
+  ports: [{name: http, port: 80, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: ops-judge-lab
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: loadgen}}
+  template:
+    metadata: {labels: {app: loadgen}}
+    spec:
+      containers:
+        - name: loadgen
+          image: curlimages/curl:8.10.1
+          command: ["sh", "-c", "while true; do curl -s -o /dev/null -m 3 http://shop/; sleep 0.2; done"]
+          resources:
+            requests: {cpu: 10m, memory: 8Mi}
+            limits: {cpu: 100m, memory: 32Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch
+  namespace: ops-judge-lab
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: batch}}
+  template:
+    metadata: {labels: {app: batch}}
+    spec:
+      containers:
+        - name: batch
+          image: busybox:1.36
+          # SIGUSR1 makes it exit 1 (a crash); PID 1 ignores signals it has no handler for, hence the trap.
+          command: ["sh", "-c", "trap 'echo crash; exit 1' USR1; echo nightly report worker; while true; do sleep 1; done"]
+          resources:
+            requests: {cpu: 5m, memory: 4Mi}
+            limits: {cpu: 50m, memory: 16Mi}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: shop
+  namespace: ops-judge-lab
+spec:
+  selector: {matchLabels: {app: shop}}
+  endpoints: [{port: http, path: /metrics, interval: 15s}]
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ops-judge-lab
+  namespace: ops-judge-lab
+spec:
+  groups:
+    - name: ops-judge-lab
+      interval: 15s
+      rules:
+        - alert: ShopHighErrorRate
+          expr: sum(rate(http_requests_total{namespace="ops-judge-lab",code="500"}[1m])) / sum(rate(http_requests_total{namespace="ops-judge-lab"}[1m])) > 0.05
+          for: 30s
+          labels: {severity: critical, service: shop, namespace: ops-judge-lab}
+          annotations: {summary: "More than 5% of shop requests fail"}
+        - alert: ShopSlowResponses
+          expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="ops-judge-lab"}[1m]))) > 0.5
+          for: 30s
+          labels: {severity: warning, service: shop, namespace: ops-judge-lab}
+          annotations: {summary: "Shop p95 latency above 500 ms"}
+        - alert: ShopDown
+          expr: kube_deployment_status_replicas_available{namespace="ops-judge-lab",deployment="shop"} == 0
+          for: 30s
+          labels: {severity: critical, service: shop, namespace: ops-judge-lab}
+          annotations: {summary: "No shop replica is available"}
+        - alert: ShopReplicaUnavailable
+          expr: kube_deployment_status_replicas_unavailable{namespace="ops-judge-lab",deployment="shop"} > 0
+          for: 30s
+          labels: {severity: warning, service: shop, namespace: ops-judge-lab}
+          annotations: {summary: "A shop replica is unavailable"}
+        - alert: ShopPodRestarted
+          expr: increase(kube_pod_container_status_restarts_total{namespace="ops-judge-lab",container="shop"}[3m]) > 0
+          labels: {severity: warning, service: shop, namespace: ops-judge-lab}
+          annotations: {summary: "A shop container restarted"}
+        - alert: ShopHighMemory
+          expr: max(container_memory_working_set_bytes{namespace="ops-judge-lab",container="shop"}) > 120e6
+          for: 30s
+          labels: {severity: warning, service: shop, namespace: ops-judge-lab}
+          annotations: {summary: "A shop container uses more than 120 MB"}
+        - alert: BatchWorkerRestarted
+          expr: increase(kube_pod_container_status_restarts_total{namespace="ops-judge-lab",container="batch"}[3m]) > 0
+          labels: {severity: warning, service: batch, namespace: ops-judge-lab}
+          annotations: {summary: "The nightly report worker restarted"}

@@ -82,3 +82,9 @@ def test_pr_number_ignores_other_repos():
     run = {"pull_requests": [{"number": 9, "base": {"repo": {"url": "https://api.github.com/repos/other/x"}}},
                              {"number": 3, "base": {"repo": {"url": "https://api.github.com/repos/o/r"}}}]}
     assert pr_number("o/r", run) == 3
+
+
+def test_comment_without_history_does_not_crash(gh_calls):
+    calls, _ = gh_calls
+    execute(ctx(state={"first_error_line": "boom", "main_pass_rate": None, "main_runs_considered": 0}), Action("needs_review", "?"))
+    assert "boom" in calls[-1][-1] and "recent runs" not in calls[-1][-1]

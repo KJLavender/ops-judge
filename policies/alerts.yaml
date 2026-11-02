@@ -1,17 +1,24 @@
 - id: alert_page
   role: gating
   kind: noul
-  question: Does this alert indicate an ongoing failure affecting users that requires waking the on-call engineer now?
+  question: >-
+    Are users of this service affected right now, so the on-call engineer must be woken up? Use the precomputed
+    facts: the user request error ratio and p95 latency, whether the service is fully down, how many replicas are
+    available, and which other alerts are firing.
   criteria:
-    "true": Users are affected right now (elevated error rate or latency on a user-facing service).
-    "false": No user impact (duplicate, already-known incident, or a non-user-facing signal).
-  thresholds: { yes_if_above: 0.6, no_if_below: 0.05 }   # compared against CALIBRATED probabilities
+    "true": Users are affected now (failing or very slow requests, or the service is down).
+    "false": No user impact yet (a replica restarted while others serve, a background job, resource warnings, duplicates).
+  thresholds: { yes_if_above: 0.6, no_if_below: 0.05 }
   fallback: [llm]          # real-time path: no human queue
   fail_mode: closed
-  fail_decision: true      # when unsure or broken, page anyway
+  fail_decision: true      # unsure or broken -> page anyway
+  rules:
+    - regex: "^true$"
+      field: service_fully_down
+      answer: true
 - id: alert_severity
   role: ranking
   kind: score
-  question: How severe is this alert?
-  criteria: [informational, minor, some users affected, many users affected, full outage]
+  question: How severe is this for users right now?
+  criteria: [no user impact, minor, some users affected, many users affected, full outage]
   fallback: [llm]

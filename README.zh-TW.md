@@ -6,7 +6,7 @@ CI 的 job 紅了，總得有人去搞清楚：是這次的修改弄壞的，還
 
 它會先試便宜的方法。regex 就看得出磁碟滿了；在自己電腦上跑的小模型，常常就看得出是 npm registry 掛了。只有看不清楚的才交給 LLM，LLM 也沒把握的再交給人。
 
-180 筆評估案例都可以在這裡逐筆看：https://kjlavender.github.io/ops-judge/
+287 筆評估案例都可以在這裡逐筆看：https://kjlavender.github.io/ops-judge/
 
 ## 實際長什麼樣子
 
@@ -62,23 +62,65 @@ LLM 沒把握（最高只有 0.30），所以它沒有硬猜，而是交給人�
 
 ## 有用嗎？
 
-我拿 GitHub 自己的重跑紀錄當答案：一個 job 失敗後，有人按了重跑，如果過了，就代表重跑可以解決；如果又失敗，就代表不行。這樣從 8 個專案收到 316 個失敗的 job，去重後剩 180 題，專案包括 airflow、deno、sveltejs/kit、vue、cpython、ruff、TypeScript、transformers。判斷時只看得到重跑之前就存在的資料。
+我拿 GitHub 自己的重跑紀錄當答案：一個 job 失敗後，有人按了重跑，如果過了，就代表重跑可以解決；如果又失敗，就代表不行。這樣從 14 個專案收到 447 個失敗的 job，去重後剩 287 題，專案包括 airflow、deno、sveltejs/kit、vue、cpython、ruff、sentry-python、k6、pydantic、electron/forge、superset、TypeScript、transformers、langchain。判斷時只看得到重跑之前就存在的資料。
 
 | | 準確率 |
 |---|---|
-| 一律回答「重跑」 | 77.2% |
-| LLM，直接用它給的機率 | 67.2% |
-| LLM，校準後 | 82.8% |
-| Kev-4B（在自己電腦上跑），校準後 | 80.6% |
-| LLM 校準後，把握 ≥ 85% 才回答 | 處理 48% 的失敗、答對 89.5%，其餘交給人 |
+| 一律回答「重跑」 | 80.5% |
+| LLM，直接用它給的機率 | 63.1% |
+| LLM，校準後 | 84.3% |
+| Kev-4B（在自己電腦上跑），校準後 | 80.8% |
+| LLM 校準後，把握 ≥ 90% 才回答 | 處理 36% 的失敗、答對 91.3%，其餘交給人 |
 
 有三件事出乎我意料：
 
-- **直接用 LLM 給的機率，比一律回答「重跑」還差。** 用已知結果去修正它的把握程度，再拿修正時沒看過的題目檢查，這是效果最大的一步：67% 變 83%。
-- **多給線索沒有幫助。** 加上失敗測試自己的歷史、其他分支有沒有同樣錯誤、GitHub 當時有沒有故障、錯誤是不是落在修改的程式行，AUROC 只從 0.722 變 0.733。把問題拆成兩個是非題，兩個模型反而都變差。
-- **值不值得跑，要看人的時間多貴。** 如果查一次失敗要 15 分鐘，「一律重跑」已經很接近最佳，模型只省約 4%；查一次 5 分鐘時省約 12%。在失敗原因比較雜的專案（airflow、sveltejs/kit、ruff）有幫助；幾乎都是偶發失敗的專案（deno、vue）就沒有加分。
+- **直接用 LLM 給的機率，比一律回答「重跑」還差。** 用已知結果去修正它的把握程度，再拿修正時沒看過的題目檢查，這是效果最大的一步：63% 變 84%。
+- **多給線索沒有幫助。** 加上失敗測試自己的歷史、其他分支有沒有同樣錯誤、GitHub 當時有沒有故障、錯誤是不是落在修改的程式行，AUROC 只從 0.729 變 0.736。把問題拆成兩個是非題，兩個模型反而都變差。
+- **值不值得跑，要看人的時間多貴。** 如果查一次失敗要 15 分鐘，「一律重跑」已經很接近最佳，模型只省約 3%；查一次 5 分鐘時省約 9%。在失敗原因比較雜的專案（airflow、sveltejs/kit、ruff、sentry-python）有幫助；幾乎都是偶發失敗的專案加分有限。
 
-第一版的答案其實標錯了。我原本看「整個 run 重跑後有沒有過」，但一個 run 可能因為某個 job 一直紅，而另一個 job 其實重跑就好。改成看每個 job 自己最後一次的結果之後，修正了 20 題。完整的過程，包括沒成功的嘗試，都寫在 [`plans/01-ops-judge-plan.md`](plans/01-ops-judge-plan.md) 第 11 節。
+第一版的答案其實標錯了。我原本看「整個 run 重跑後有沒有過」，但一個 run 可能因為某個 job 一直紅，而另一個 job 其實重跑就好。改成看每個 job 自己最後一次的結果之後，修正了 23 題。完整的過程，包括沒成功的嘗試，都寫在 [`plans/01-ops-judge-plan.md`](plans/01-ops-judge-plan.md) 第 11 節。
+
+## 告警
+
+同一套判斷流程也用來決定告警要不要叫醒人。有兩種用法：
+
+- `ops-judge alerts watch`：直接輪詢 Prometheus，不需要 Alertmanager。
+- `ops-judge alerts serve`：接收 Alertmanager 的 webhook。
+
+每來一個新告警，它會先把事實算好：服務的請求錯誤率和 p95 延遲、可用的副本數、還有哪些告警正在響、距離上次部署多久。接著決定去向：
+
+- 立刻叫人
+- 放進摘要
+- 靜音：同一個服務已經有叫過人、而且還在響的告警時
+
+如果沒有任何模型能做出判斷，它還是會叫人。
+
+我在家裡的 k3s 叢集上測試：建了一個小的「商店」服務、模擬流量和七條告警規則，注入八種故障，各跑兩輪。下面是第二輪的即時輸出：
+
+```
+$ ops-judge alerts watch --prometheus http://127.0.0.1:19090 --namespace ops-judge-lab
+21:33:20 PAGE   ShopHighErrorRate        shop     err=56% p95=0.048s replicas=2/2  decided by llm, severity 3
+21:35:34 PAGE   ShopHighErrorRate        shop     err=6% p95=0.048s replicas=2/2  decided by llm, severity 2
+21:38:12 PAGE   ShopSlowResponses        shop     err=0% p95=2.244s replicas=2/2  decided by fallback (fail closed), severity 2
+21:41:38 PAGE   ShopDown                 shop     err=- p95=- replicas=0/0  decided by rule, severity 4
+21:44:13 digest ShopPodRestarted         shop     err=0% p95=0.048s replicas=2/2  no user impact, severity 0
+21:47:37 digest ShopHighMemory           shop     err=0% p95=0.048s replicas=2/2  no user impact, severity 0
+21:50:41 digest BatchWorkerRestarted     batch    err=0% p95=0.048s replicas=1/1  no user impact, severity 0
+```
+
+兩輪合計 14 個告警，其中 8 個發生在使用者真的受影響的故障期間：
+
+| | 叫人次數 | 使用者沒受影響卻叫人 | 漏掉的事故 |
+|---|---|---|---|
+| 每個告警都叫人 | 14 | 6 | 0 |
+| 只有 `severity: critical` 才叫 | 6 | 0 | 2（兩次都是回應變慢） |
+| ops-judge | 8 | 0 | 0 |
+
+8 個事故是很小的樣本：8 次都沒漏，真實的漏叫率仍可能高到約 37%。回應變慢那個告警之所以有叫人，是因為 LLM 沒把握、而關卡在不確定時預設叫人，不是模型判斷對了。
+
+測試環境（`k8s/alert-lab.yaml`）、注入故障和計分的腳本（`scripts/alert_lab.py`、`scripts/eval_alerts.py`）都在 repo 裡，任何裝了 kube-prometheus-stack 的叢集都能重跑。
+
+第一版的規則是：同一個服務 30 分鐘內，第二次以後都靜音。在測試環境裡，這把四個不同的事故都吞掉了，因為它們都在上一個結束後幾分鐘就開始。現在改成只有在叫過人的那個告警還在響時才靜音。
 
 ## 在整個流程中的位置
 
@@ -92,6 +134,25 @@ CI 失敗 → ops-judge
            └ 不確定   → 交給人
 ```
 
+## 用在你的 repo
+
+把 [`examples/workflows/ops-judge.yml`](examples/workflows/ops-judge.yml) 複製到 `.github/workflows/`。被監看的 workflow 失敗時，它會分析每個失敗的 job，然後照判斷結果動手：
+
+- 偶發（flaky test、基礎設施）：把失敗的 job 重跑一次
+- 環境／基礎設施問題：另外發到 `OPSJUDGE_NOTIFY_WEBHOOK`（Slack 相容），沒設定就寫進 job summary
+- 每一種情況：在 PR 上留一則說明；之後如果有更完整的判斷，會直接改寫那一則
+- 判成偶發、重跑後卻又失敗的，會補一則留言，說這大概是真的問題
+- 來自 fork 的 PR 永遠不自動重跑
+
+要用 LLM 那一層，請加一個 `CLAUDE_CODE_OAUTH_TOKEN` secret（用 `claude setup-token` 產生）。沒有的話只會跑規則那一層，看不清楚的就交給人。對一個看不清楚的關卡來說，這正是該有的行為。
+
+[KJLavender/ops-judge-demo](https://github.com/KJLavender/ops-judge-demo) 用兩個 PR 示範：
+
+- [#1](https://github.com/KJLavender/ops-judge-demo/pull/1)：CI 第一次執行時碰到模擬的 registry 故障。ops-judge 判為基礎設施問題（0.81），重跑後第二次就過了。
+- [#2](https://github.com/KJLavender/ops-judge-demo/pull/2)：修改把測試弄壞了。ops-judge 判為程式錯誤（0.78），在 PR 上說明原因，沒有重跑。之後有人手動重跑、又失敗了，它也沒有多留言，因為它從來沒說過這是偶發。
+
+`ops-judge doctor` 會檢查 gh 是否登入、claude CLI 在不在，以及 decision model 連不連得上。
+
 ## 怎麼跑
 
 ```bash
@@ -101,6 +162,8 @@ python -m pytest                      # 46 個測試，不連網
 ops-judge triage <run 網址>            # 需要已登入的 gh CLI
 ops-judge triage <run 網址> --jev http://127.0.0.1:8094/v1/systemone   # 加上本機的 decision model
 ops-judge triage <run 網址> --no-history --no-context                  # 比較快
+ops-judge triage <run 網址> --dry-run                                  # 只顯示 --act 會做什麼
+ops-judge doctor
 ```
 
 LLM 這一層呼叫本機的 `claude` CLI，走 Claude 訂閱，不需要 API key。
@@ -126,19 +189,24 @@ python scripts/experiments.py
 python scripts/build_site.py
 ```
 
-## 還沒做的
+## 限制
 
-- 重跑、PR 留言、通知這些動作已經會決定，但還沒有真的對 GitHub 執行。下一步是做成 GitHub Action。
-- 雲端的 Jev 還沒測過，因為還沒有 API key。目前用本機的 Kev-4B 代替。
-- 原本計畫裡的告警降噪那一半（Alertmanager、Kubernetes、Chaos Mesh）還沒開始。
-- 180 題不算多，而且少數幾個專案佔了大部分。
+- 雲端的 Jev 還沒跑過，因為我沒有 API key。目前用本機的 Kev-4B 代替。
+  - 有兩個網址都會回應「需要 API key」：`https://api.typesafe.ai/v1/systemone` 是預設值，也是 TypeSafe 文件上的網址；另一個是 `jevtypesafeai.com`。
+  - `jv_live_…` 開頭的 key 屬於第二個。
+  - 不確定手上的 key 是哪一個，就跑 `ops-judge doctor`。
+- 287 題 CI 和 14 個實驗告警都是小樣本，而且 CI 資料大部分來自少數幾個專案。
+- 告警實驗用 `kubectl` 注入故障，沒有用 Chaos Mesh。告警規則也假設服務有提供 `http_requests_total` 和 `http_request_duration_seconds`。
 
 ## 目錄
 
 ```
 judge_core/     各層判斷器（規則、Jev/System One、LLM、人工佇列）、policy、串接、稽核紀錄、校準、評估
-ops_judge/ci/   log 擷取、事實、額外線索、GitHub 存取、動作
-ops_judge/triage.py   CLI
+ops_judge/ci/   log 擷取、事實、額外線索、GitHub 存取、動作和執行
+ops_judge/alerts/     Prometheus 客戶端、告警事實、分流、監看／webhook 服務
+ops_judge/triage.py   CI 指令
+action.yml, examples/workflows/   GitHub Action
+k8s/alert-lab.yaml    告警實驗環境
 policies/       YAML policy
 scripts/        資料收集、評估、實驗、網頁產生
 site/, docs/    案例瀏覽頁的模板和產生出來的網頁

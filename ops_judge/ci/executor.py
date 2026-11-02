@@ -58,7 +58,7 @@ def comment_body(ctx: Context, action: Action) -> str:
         lines += ["First error:", "```", s["first_error_line"][:300], "```"]
     if s.get("overlapping_files"):
         lines.append("The stack trace touches files changed in this PR: " + ", ".join(f"`{f}`" for f in s["overlapping_files"][:5]))
-    if "main_pass_rate" in s:
+    if s.get("main_pass_rate") is not None:
         lines.append(f"This job passed {s['main_pass_rate']:.0%} of {s['main_runs_considered']} recent runs on the default branch.")
     lines += ["", {
         "rerun": "Rerunning the failed jobs once.",
