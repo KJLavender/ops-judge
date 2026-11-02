@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from judge_core import JevJudge, LLMJudge, RuleJudge, load_policies  # noqa: E402
 from judge_core.evaluate import Prediction, calibration, plot_reliability, plot_sweep, sweep_thresholds  # noqa: E402
-from judge_core.types import Answer, JudgeRequest  # noqa: E402
+from judge_core.types import Answer, JudgeRequest, JudgeResult, Question  # noqa: E402
 from ops_judge.ci.templates import mask  # noqa: E402
 from toy_eval import OUT, cached_preds  # noqa: E402
 
@@ -46,7 +46,34 @@ def dedupe(rows: list[dict]) -> list[dict]:
 
 
 def p_transient(a: Answer) -> float:
+    if a.kind == "noul":  # split-question runs answer P(transient) directly
+        return float(a.value)
     return sum(a.probabilities.get(k, 0.0) for k in TRANSIENT)  # type: ignore[union-attr]
+
+
+# Two plain yes/no questions instead of one 5-way choice: small decision models handle these better.
+SPLIT_QUESTIONS = [
+    Question(key="environment_caused", kind="noul",
+             instructions="Was this CI failure caused by the environment it ran in (network, package registry, "
+                          "runner or machine problems, cloud capacity) rather than by the code being tested?"),
+    Question(key="intermittent", kind="noul",
+             instructions="Does the evidence suggest this failure is intermittent, so the same code would likely "
+                          "pass if the job simply ran again?"),
+]
+
+
+class SplitJudge:
+    """Asks SPLIT_QUESTIONS in one request and answers the original question with
+    P(transient) = max(P(environment), P(intermittent)) as a noul."""
+
+    def __init__(self, inner):
+        self.inner, self.name = inner, f"{inner.name}-split"
+
+    def judge(self, req: JudgeRequest) -> JudgeResult:
+        res = self.inner.judge(JudgeRequest(state=req.state, questions=SPLIT_QUESTIONS))
+        p = max(float(res.answers[q.key].value) for q in SPLIT_QUESTIONS)
+        return res.model_copy(update={"answers": {req.questions[0].key: Answer.noul(p)},
+                                      "raw": {k: float(a.value) for k, a in res.answers.items()}})
 
 
 def auroc(scores: np.ndarray, labels: np.ndarray) -> float:
@@ -87,7 +114,10 @@ def main() -> None:
     for spec in args.judges.split(","):
         # "kev@http://127.0.0.1:8094/v1/systemone" = a local llama-server decision model on the Jev API
         name, _, url = spec.partition("@")
-        judge = JevJudge(url=url) if url else factories.get(name, JevJudge)()  # cached runs need no live backend
+        base = name.removesuffix("-split")
+        judge = JevJudge(url=url) if url else factories.get(base.split("-")[0], JevJudge)()  # cached runs need no live backend
+        if name.endswith("-split"):
+            judge = SplitJudge(judge)
         preds = cached_preds(f"reruns_{name}", judge, rows, question, args.workers)
         ok = [p for p in preds if p.answer is not None]
         score = np.array([p_transient(p.answer) for p in ok])  # type: ignore[arg-type]

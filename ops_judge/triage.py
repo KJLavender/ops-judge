@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -24,9 +25,10 @@ from pathlib import Path
 from judge_core import Cascade, HumanQueue, JevJudge, LLMJudge, RuleJudge, Store, load_policies
 from judge_core.types import JudgeError, JudgeRequest, JudgeResult
 from ops_judge.ci.actions import plan_action
-from ops_judge.ci.extract import error_excerpt
+from ops_judge.ci import context
+from ops_judge.ci.extract import error_excerpt, failing_tests, stack_frames
 from ops_judge.ci.facts import CIFailure, build_state, first_error_line
-from ops_judge.ci.github import changed_files, gh, job_history, main_runs, ts
+from ops_judge.ci.github import all_jobs, changed_files, changed_hunks, gh, job_history, main_runs, ts, workflow_runs
 from ops_judge.ci.templates import TemplateIndex, mask
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,8 +47,18 @@ class Skipped:
         raise JudgeError(f"skipped: {self.reason}")
 
 
-def history(repo: str, run: dict, job_name: str, days: int, max_runs: int) -> tuple[list[bool], int, TemplateIndex]:
-    """This job's results on the default branch in the `days` before the run (never after it)."""
+def log_summary(repo: str, job_id: int) -> dict | None:
+    try:
+        log = gh(f"repos/{repo}/actions/jobs/{job_id}/logs", raw=True)
+    except RuntimeError:
+        return None
+    excerpt = error_excerpt(log)
+    return {"tests": failing_tests(excerpt), "template": mask(first_error_line(excerpt, log))}
+
+
+def history(repo: str, run: dict, job_name: str, days: int, max_runs: int) -> tuple[list[bool], int, TemplateIndex, list[dict]]:
+    """This job's results on the default branch in the `days` before the run (never after it), plus the
+    failing tests and error template of its recent default-branch failures."""
     branch = gh(f"repos/{repo}")["default_branch"]
     end = ts(run["created_at"])
     runs = main_runs(repo, run["workflow_id"], branch, end - timedelta(days=days), end, max_pages=1)[:max_runs]
@@ -54,13 +66,41 @@ def history(repo: str, run: dict, job_name: str, days: int, max_runs: int) -> tu
         rows = [r for chunk in pool.map(lambda r: job_history(repo, r, {job_name}), runs) for r in chunk]
     rows = [r for r in rows if ts(r["created_at"]) < end]
     idx = TemplateIndex(use_drain=False)
-    for r in [r for r in rows if not r["first_ok"]][:3]:
+    fails = [r for r in rows if not r["first_ok"]][:10]
+    with ThreadPoolExecutor(8) as pool:
+        summaries = list(pool.map(lambda r: log_summary(repo, r["first_job_id"]), fails))
+    main_failures = [r | s for r, s in zip(fails, summaries) if s]
+    idx.seen |= {m["template"] for m in main_failures}
+    return [r["first_ok"] for r in rows], sum(r["fixed_by_rerun"] for r in rows), idx, main_failures
+
+
+def other_branch_failures(repo: str, run: dict, job_name: str, max_runs: int = 15) -> list[dict]:
+    """First-attempt failures of the same job on other branches in the 3 days before this run."""
+    end = ts(run["created_at"])
+    runs = [r for r in workflow_runs(repo, run["workflow_id"], end - timedelta(days=3), end, max_pages=2)
+            if r["head_branch"] != run["head_branch"] and (r["conclusion"] == "failure" or r["run_attempt"] > 1)][:max_runs]
+
+    def one(r):
         try:
-            log = gh(f"repos/{repo}/actions/jobs/{r['first_job_id']}/logs", raw=True)
-            idx.seen.add(mask(first_error_line(error_excerpt(log), log)))
+            jobs = sorted(all_jobs(repo, r["id"]), key=lambda j: j.get("run_attempt", 1))
         except RuntimeError:
-            pass
-    return [r["first_ok"] for r in rows], sum(r["fixed_by_rerun"] for r in rows), idx
+            return None
+        first = next((j for j in jobs if j["name"] == job_name), None)
+        if not first or first.get("conclusion") != "failure":
+            return None
+        s = log_summary(repo, first["id"])
+        return s and {"created_at": r["created_at"], "head_branch": r["head_branch"]} | s
+
+    with ThreadPoolExecutor(8) as pool:
+        return [x for x in pool.map(one, runs) if x]
+
+
+def github_incidents() -> list[dict]:
+    try:
+        with urllib.request.urlopen("https://www.githubstatus.com/api/v2/incidents.json", timeout=10) as resp:
+            return json.load(resp)["incidents"]
+    except OSError:
+        return []
 
 
 def build_cascade(args, store: Store) -> Cascade:
@@ -99,6 +139,8 @@ def triage(args) -> list[dict]:
     head = (run.get("head_repository") or {}).get("full_name")
     is_fork = bool(head and head != repo)
     files = changed_files(repo, run)
+    hunks = {} if args.no_context else changed_hunks(repo, run)
+    incidents = [] if args.no_context else github_incidents()
     timings["fetch_run"] = time.perf_counter() - t0
 
     store = Store(ROOT / "data/triage.sqlite")
@@ -109,12 +151,22 @@ def triage(args) -> list[dict]:
         log = "\n".join(gh(f"repos/{repo}/actions/jobs/{job['id']}/logs", raw=True).split("\n")[-MAX_LOG_LINES:])
         timings["fetch_log"] = time.perf_counter() - t
         t = time.perf_counter()
-        main_hist, fixed, idx = ([], 0, None) if args.no_history else history(repo, run, job["name"], args.days, args.max_runs)
+        main_hist, fixed, idx, main_fail = ([], 0, None, []) if args.no_history else history(repo, run, job["name"], args.days, args.max_runs)
         timings["history"] = time.perf_counter() - t
         t = time.perf_counter()
         state = build_state(CIFailure(log=log, changed_files=files, is_fork_pr=is_fork,
                                       main_history=main_hist, main_fixed_by_rerun=fixed), idx)
         state.pop("rerun_result")  # the decision is made before any rerun
+        tests = failing_tests(state["error_excerpt"])
+        state["failing_tests"] = tests[:5]
+        if not args.no_history and tests:
+            state |= context.test_history(tests, main_fail, run["created_at"], args.days)
+        if not args.no_context:
+            state |= context.same_error_elsewhere(mask(state["first_error_line"]), run["head_branch"],
+                                                  other_branch_failures(repo, run, job["name"]), run["created_at"])
+            state |= context.github_incident(run["created_at"], incidents)
+            if hunks:
+                state |= context.changed_lines_hit(stack_frames(state["error_excerpt"]), hunks)
         timings["preprocess"] = time.perf_counter() - t
         t = time.perf_counter()
         d = cascade.run(state, ["ci_failure_class"], context={"repo": repo, "run_id": run_id, "job": job["name"]})["ci_failure_class"]
@@ -154,6 +206,16 @@ def show(r: dict) -> None:
               f"{s['main_failures']} failures, {s['main_failures_fixed_by_rerun']} fixed by rerun")
     if "error_seen_on_main_recently" in s:
         print(f"  error seen on main {s['error_seen_on_main_recently']}")
+    if s.get("failing_tests"):
+        print(f"  failing tests      {', '.join(s['failing_tests'][:3])[:100]}")
+    if "same_test_failed_on_main" in s:
+        print(f"  same test on main  failed {s['same_test_failed_on_main']}x, {s['same_test_fixed_by_rerun_on_main']} fixed by rerun")
+    if "same_error_on_other_branches_3d" in s:
+        print(f"  same error elsewhere {s['same_error_on_other_branches_3d']} other branches in the last 3 days")
+    if "github_incident_active" in s:
+        print(f"  GitHub incident    {s.get('github_incident', 'none')}")
+    if "error_in_changed_lines" in s:
+        print(f"  error in changed lines {s['error_in_changed_lines']}")
     print(f"  infra signals      {', '.join(s['infra_signals']) or '-'}")
     print(f"  env signals        {', '.join(s['env_signals'])[:100] or '-'}")
     print(f"  fork PR            {r['is_fork_pr']}")
@@ -197,6 +259,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--jev", help="System One endpoint, e.g. http://127.0.0.1:8094/v1/systemone")
     ap.add_argument("--no-llm", action="store_true", help="skip the LLM tier")
     ap.add_argument("--no-history", action="store_true", help="skip main-branch history (faster)")
+    ap.add_argument("--no-context", action="store_true", help="skip other-branch failures, GitHub incidents, changed lines")
     ap.add_argument("--days", type=int, default=14)
     ap.add_argument("--max-runs", type=int, default=30, help="main-branch runs to inspect for history")
     ap.add_argument("--max-jobs", type=int, default=3)

@@ -15,6 +15,32 @@ RuleJudge (regex) ─▶ JevJudge (System One model) ─▶ LLMJudge ─▶ Huma
 - Every decision is written to a **SQLite audit log**: input hash, tier-by-tier answers, latency, cost, and the path taken.
 - Human labels feed back as calibration and training data.
 
+## What it is, and what it is not
+
+**ops-judge is a triage judge, not a repair agent.** It answers "is this CI failure a code bug, an environment problem, or a fluke — rerun it, page a person, or hand it to a repair agent?" It does not edit code or open PRs.
+
+| Role | Examples | Responsible for |
+|---|---|---|
+| **Judge** (this project) | ops-judge | Cheap, auditable decision on cause and next step |
+| Workflow framework | GitHub Agentic Workflows | When an AI runs and which actions it may take |
+| Repair agent | Copilot coding agent, auto-heal CI agents | Read the error, change code, run tests, open a PR |
+
+They compose rather than compete. Triage filters out the many "just rerun it" failures first, so a repair agent never spends effort fixing something that was not broken:
+
+```
+CI failure ─▶ ops-judge: cause and next step
+               ├─ transient ─▶ automatic rerun
+               ├─ environment / infrastructure ─▶ notify the platform team
+               ├─ code bug ─▶ repair agent ─▶ rerun tests, human review
+               └─ unsure ─▶ human queue
+```
+
+**What works today** (honest version):
+
+- **Done**: CI log preprocessing, tiered judging, calibration, audit log, human queue, evaluation tooling, and a command that triages any public GitHub Actions run (`ops-judge triage`).
+- **Not wired yet**: the rerun / PR comment / notify decisions are implemented but not yet executed against GitHub; alert noise reduction is planned; the hosted Jev tier awaits an API key.
+- So today it is a **usable, tested judgment layer evaluated on real data**, not a deployed self-healing CI bot.
+
 ## Status
 
 | Part | State |
@@ -24,13 +50,13 @@ RuleJudge (regex) ─▶ JevJudge (System One model) ─▶ LLMJudge ─▶ Huma
 | Calibration (isotonic / Platt) and evaluation (threshold sweep, ECE, compare with error correlation, learning curve) | done |
 | CI preprocessing: log cleanup, error excerpt, stack/changed-file overlap, infra/env signals, Drain3 templates | done |
 | CI actions: rerun / comment / notify, no auto-rerun for fork PRs, flaky → code_bug when the rerun fails | done (logic only, not yet wired to GitHub) |
-| Rerun-label collector + real-data eval (`collect_reruns.py`, `build_dataset.py`, `eval_reruns.py`) | 220 failures from 4 repos; LLM AUROC 0.74 with main-branch history, local Kev-4B 0.69 (see `plans/01-ops-judge-plan.md` §11) |
+| Real-data evaluation (`collect_reruns.py`, `collect_history.py`, `collect_context.py`, `build_dataset.py`, `eval_reruns.py`, `experiments.py`) | 316 failures from 8 repos → 180 cases; always-rerun 77.2%, LLM 82.8% after calibration (90% when answering only above 85% confidence), local Kev-4B 80.6% (see `plans/01-ops-judge-plan.md` §11.3) |
 | Jev live run | waiting for an API key (`TYPESAFE_API_KEY`) |
 | Alert pipeline (Alertmanager webhook, K8s + Chaos Mesh) | planned (see `plans/01-ops-judge-plan.md`) |
 
 ## Demo
 
-- **Case explorer** — live at **https://kjlavender.github.io/ops-judge/** (`docs/index.html`, no backend): all 103 real failures; for each one the facts the judges saw, every model's probabilities, the cascade path, and what actually happened. Rebuild with `python scripts/build_site.py`.
+- **Case explorer** — live at **https://kjlavender.github.io/ops-judge/** (`docs/index.html`, no backend): all 180 real failures; for each one the facts the judges saw, every model's probabilities, the cascade path, and what actually happened. Rebuild with `python scripts/build_site.py`.
 - **Live triage** of any public GitHub Actions run:
 
 ```bash
@@ -45,7 +71,7 @@ It prints the extracted facts, each tier's answer (accept or escalate), the deci
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest                       # 38 tests, no network
+python -m pytest                       # 46 tests, no network
 python scripts/toy_eval.py             # 20-item toy CI set → examples/out/{sweep,calibration}.png, compare.json, audit.sqlite
 python scripts/collect_reruns.py owner/repo --pages 3   # flaky labels from GitHub Actions reruns (needs gh auth)
 ```

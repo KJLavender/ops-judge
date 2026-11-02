@@ -17,6 +17,7 @@ class Prediction(BaseModel):
     latency_ms: float = 0.0
     cost_usd: float = 0.0
     error: str | None = None
+    input_hash: str | None = None  # hash of the state judged; a cache entry is only valid for the same input
 
 
 def predicted_value(a: Answer) -> Any:
@@ -34,12 +35,13 @@ def run_judge(judge: Judge, dataset: list[dict], question: Question) -> list[Pre
     """dataset items: {"id", "state", "label"}"""
     preds = []
     for item in dataset:
+        req = JudgeRequest(state=item["state"], questions=[question])
         try:
-            r = judge.judge(JudgeRequest(state=item["state"], questions=[question]))
-            preds.append(Prediction(id=item["id"], answer=r.answers.get(question.key),
-                                    latency_ms=r.latency_ms, cost_usd=r.cost_usd))
+            r = judge.judge(req)
+            preds.append(Prediction(id=item["id"], answer=r.answers.get(question.key), latency_ms=r.latency_ms,
+                                    cost_usd=r.cost_usd, input_hash=req.input_hash()))
         except JudgeError as e:
-            preds.append(Prediction(id=item["id"], answer=None, error=str(e)[:300]))
+            preds.append(Prediction(id=item["id"], answer=None, error=str(e)[:300], input_hash=req.input_hash()))
     return preds
 
 

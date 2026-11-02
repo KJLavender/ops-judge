@@ -66,13 +66,22 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=14)
     args = ap.parse_args()
     failures = [json.loads(line) for line in Path(args.src).read_text(encoding="utf-8").splitlines() if line]
+    out = Path(args.out)
+    # Incremental: workflows already in the output are skipped; run metadata comes from collect_context's cache.
+    existing = [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines() if x] if out.exists() else []
+    done = {(r["repo"], r["workflow_id"]) for r in existing}
+    meta_path = ROOT / "data/run_meta.jsonl"
+    meta = ({m["run_id"]: m for m in map(json.loads, meta_path.read_text(encoding="utf-8").splitlines())}
+            if meta_path.exists() else {})
 
     # Group failures by workflow; the run endpoint gives workflow_id, the repo gives the default branch.
     branches = {repo: gh(f"repos/{repo}")["default_branch"] for repo in {f["repo"] for f in failures}}
     groups: dict[tuple, dict] = {}
     for f in failures:
-        run = gh(f"repos/{f['repo']}/actions/runs/{f['run_id']}")
+        run = meta.get(f["run_id"]) or gh(f"repos/{f['repo']}/actions/runs/{f['run_id']}")
         key = (f["repo"], run["workflow_id"])
+        if key in done:
+            continue
         g = groups.setdefault(key, {"jobs": set(), "start": ts(run["created_at"]), "end": ts(run["created_at"])})
         g["jobs"].add(f["job_name"])
         g["start"] = min(g["start"], ts(run["created_at"]))
@@ -86,8 +95,8 @@ def main() -> None:
             for chunk in pool.map(lambda r: safe_history(repo, r, g["jobs"]), runs):
                 rows += chunk
     add_templates(rows)
-    Path(args.out).write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
-    print(f"wrote {len(rows)} history rows -> {args.out}", file=sys.stderr)
+    out.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in existing + rows), encoding="utf-8")
+    print(f"added {len(rows)} history rows ({len(existing) + len(rows)} total) -> {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":

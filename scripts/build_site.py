@@ -31,11 +31,15 @@ from ops_judge.ci.actions import plan_action  # noqa: E402
 OUT = ROOT / "examples/out"
 # (cache name, display name, note) in display order; the cascade uses kev then llm.
 MODELS = [
-    ("llm", "LLM (Sonnet) + history", "claude CLI"),
-    ("llm-nohist", "LLM (Sonnet), no history", "claude CLI"),
-    ("kev-nohist", "Kev-4B, no history", "local GPU, llama.cpp"),
-    ("julia-nohist", "Julia-1, no history", "local CPU, llama.cpp"),
-    ("laya-nohist", "Laya, no history", "local CPU, llama.cpp"),
+    ("llm", "LLM (Sonnet), all facts", "claude CLI"),
+    ("llm-nocontext", "LLM, without the new context facts", "claude CLI"),
+    ("llm-split", "LLM, two yes/no questions", "claude CLI"),
+    ("kev", "Kev-4B, all facts", "local, llama.cpp (CPU)"),
+    ("kev-split", "Kev-4B, two yes/no questions", "local, llama.cpp (CPU)"),
+    ("llm-nohist", "LLM (Sonnet), log only", "claude CLI"),
+    ("kev-nohist", "Kev-4B, log only", "local GPU, llama.cpp"),
+    ("julia-nohist", "Julia-1, log only", "local CPU, llama.cpp"),
+    ("laya-nohist", "Laya, log only", "local CPU, llama.cpp"),
 ]
 FACT_KEYS = ["first_error_line", "stack_overlaps_changed_files", "overlapping_files", "changed_files_count",
              "main_pass_rate", "main_runs_considered", "main_failures", "main_failures_fixed_by_rerun",
@@ -50,7 +54,16 @@ def load_preds(name: str) -> dict[str, dict]:
 
 
 def p_transient(a: dict) -> float:
+    if a["kind"] == "noul":  # split-question runs answer P(transient) directly
+        return float(a["value"])
     return sum(a["probabilities"].get(k, 0.0) for k in TRANSIENT)
+
+
+def display_probs(a: dict) -> dict[str, float]:
+    """Split-question runs answer P(transient) as a yes/no; name the two sides so the page reads plainly."""
+    if a["kind"] == "noul":
+        return {"rerun_fixes_it": float(a["value"]), "rerun_wont_help": 1 - float(a["value"])}
+    return a["probabilities"]
 
 
 def baselines(rows: list[dict], y: np.ndarray) -> list[dict]:
@@ -97,13 +110,17 @@ def main() -> None:
     rows = dedupe(raw)
     y = np.array([r["label"] == "flaky_test" for r in rows], float)
     preds = {m: load_preds(m) for m, _, _ in MODELS}
+    # Only models that answered (nearly) every case, so all rows of the table compare the same questions.
+    preds = {m: p for m, p in preds.items() if sum(r["id"] in p for r in rows) >= 0.9 * len(rows)}
     policy = load_policies(ROOT / "policies/ci.yaml")[0]
     rule = RuleJudge.from_policies([policy])
     q = policy.to_question()
 
+    exp_path = ROOT / "data/experiments.json"
+    experiments = json.loads(exp_path.read_text(encoding="utf-8")) if exp_path.exists() else None
     methods = baselines(rows, y)
     for key, label, note in MODELS:
-        p = preds[key]
+        p = preds.get(key)
         if not p:
             continue
         ok = [r for r in rows if p.get(r["id"], {}).get("answer")]
@@ -111,7 +128,8 @@ def main() -> None:
         t = np.array([r["label"] == "flaky_test" for r in ok], float)
         methods.append({"name": label, "kind": "model", "note": note, "n": len(ok),
                         "accuracy": float(np.mean((s >= 0.5) == t)), "auroc": auroc(s, t), "ece": ece(s, t, 5),
-                        "latency_ms": float(np.median([p[r["id"]]["latency_ms"] for r in ok]))})
+                        "latency_ms": float(np.median([p[r["id"]]["latency_ms"] for r in ok])),
+                        "accuracy_calibrated": (experiments or {}).get("models", {}).get(key, {}).get("calibrated", {}).get("accuracy")})
 
     cases, tier_counts, cascade_correct = [], {"rule": 0, "kev": 0, "llm": 0, "human": 0}, []
     for r in rows:
@@ -121,9 +139,12 @@ def main() -> None:
         if hit:
             path.append({"tier": "rule", "value": hit.value, "top": 1.0, "accepted": True})
             final, by = hit.value, "rule"
-        for tier, key in (("kev", "kev-nohist"), ("llm", "llm")):
+        kev_key = next((k for k in ("kev", "kev-nohist") if k in preds), None)
+        for tier, key in (("kev", kev_key), ("llm", "llm")):
             if final is not None:
                 break
+            if key not in preds:
+                continue
             a = preds[key].get(r["id"], {}).get("answer")
             if not a:
                 continue
@@ -146,13 +167,14 @@ def main() -> None:
             "gold": "transient" if gold else "persistent", "fork": r["is_fork_pr"], "log_lines": r["log_lines"],
             "facts": {k: r["state"][k] for k in FACT_KEYS if k in r["state"]},
             "excerpt": r["state"]["error_excerpt"],
-            "models": {label: {"value": p[r["id"]]["answer"]["value"], "probs": p[r["id"]]["answer"]["probabilities"]}
-                       for key, label, _ in MODELS if (p := preds[key]).get(r["id"], {}).get("answer")},
+            "models": {label: {"value": p[r["id"]]["answer"]["value"], "probs": display_probs(p[r["id"]]["answer"])}
+                       for key, label, _ in MODELS if (p := preds.get(key, {})).get(r["id"], {}).get("answer")},
             "path": path, "final": final, "decided_by": by, "action": vars(action),
             "correct": None if final is None else (final in TRANSIENT) == gold,
         })
 
     summary = {
+        "experiments": experiments,
         "n_raw": len(raw), "n": len(rows), "n_transient": int(y.sum()), "repos": sorted({c["repo"] for c in cases}),
         "methods": methods, "cascade": {"tiers": tier_counts,
                                         "accuracy_on_decided": float(np.mean(cascade_correct)) if cascade_correct else None,

@@ -120,3 +120,16 @@ def test_calibration_changes_the_verdict():
 def test_missing_judge_rejected():
     with pytest.raises(ValueError):
         Cascade(CI, {"jev": FakeJudge("jev")})
+
+
+def test_split_judge_combines_two_yes_no_questions():
+    import sys
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from eval_reruns import SplitJudge
+    from judge_core.types import JudgeRequest
+
+    inner = FakeJudge("kev", {"environment_caused": Answer.noul(0.2), "intermittent": Answer.noul(0.7)})
+    res = SplitJudge(inner).judge(JudgeRequest(state={"x": 1}, questions=[CI[0].to_question()]))
+    assert [q.key for q in inner.requests[0].questions] == ["environment_caused", "intermittent"]
+    assert res.answers["ci_failure_class"].value == pytest.approx(0.7)
+    assert res.raw == {"environment_caused": 0.2, "intermittent": 0.7}

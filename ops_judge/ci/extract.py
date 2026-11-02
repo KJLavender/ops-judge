@@ -114,3 +114,45 @@ def infra_signals(text: str) -> list[str]:
 
 def env_signals(text: str) -> list[str]:
     return sorted({m.group(0)[:80] for m in ENV_SIGNALS.finditer(text)})
+
+
+# Failing test names, per test runner. The name is what links this failure to the same test's history.
+FAILING_TEST_PATTERNS = [
+    re.compile(r"^(?:FAILED|ERROR)\s+(\S+::\S+)", re.MULTILINE),                    # pytest
+    re.compile(r"^(?:FAIL|ERROR): \w+ \(([\w.]+)\)", re.MULTILINE),                 # unittest / cpython
+    re.compile(r"^test (test_\w+) failed", re.MULTILINE),                            # cpython regrtest module
+    re.compile(r"^\s*FAIL\s+(?:\S+\s+)?(\S+\.(?:[jt]sx?|mjs)(?: > [^\n]+)?)", re.MULTILINE),  # jest / vitest
+    re.compile(r"^\s*\d+\) \[[^\]]+\] › ([^\n]+?)\s*─*$", re.MULTILINE),            # playwright
+    re.compile(r"^test (\S+) \.\.\. FAILED", re.MULTILINE),                          # cargo
+    re.compile(r"^---- (\S+) stdout ----", re.MULTILINE),                            # cargo
+    re.compile(r"^\s*--- FAIL: (\S+)", re.MULTILINE),                                # go
+]
+DURATION = re.compile(r"\s*\(?\d+(?:\.\d+)?\s?m?s\)?$")
+
+
+def failing_tests(text: str, limit: int = 20) -> list[str]:
+    found: list[str] = []
+    for rx in FAILING_TEST_PATTERNS:
+        for m in rx.finditer(text):
+            # Line numbers (playwright "spec.ts:12:5") move with every edit; drop them so history matches.
+            name = re.sub(r":\d+:\d+", "", DURATION.sub("", m.group(1).strip()))[:200]
+            if name and name not in found:
+                found.append(name)
+    return found[:limit]
+
+
+FRAME_PATTERNS = [
+    re.compile(r'File "([^"]+)", line (\d+)'),                                       # Python
+    re.compile(r"((?:[\w.@-]+/)*[\w.@-]+\.(?:[jt]sx?|mjs|cjs|py|go|rs|java|kt|rb|cs|cpp|cc|c|h|php|swift)):(\d+)"),
+]
+
+
+def stack_frames(text: str) -> list[tuple[str, int]]:
+    """(path, line) pairs from stack traces and compiler errors, library frames removed."""
+    frames: list[tuple[str, int]] = []
+    for rx in FRAME_PATTERNS:
+        for m in rx.finditer(text):
+            path = m.group(1).replace("\\", "/")
+            if not NOISE_PATH.search(path) and (path, int(m.group(2))) not in frames:
+                frames.append((path, int(m.group(2))))
+    return frames

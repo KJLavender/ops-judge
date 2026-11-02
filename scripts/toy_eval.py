@@ -50,14 +50,25 @@ class ReplayJudge:
 
 
 def cached_preds(name: str, judge, dataset: list[dict], question, workers: int) -> list[Prediction]:
+    """Judge only what the cache lacks. An entry is reused when its id matches and, if it recorded one,
+    its input hash matches too: changed facts mean a fresh judgment, never a stale answer."""
     path = OUT / f"preds_{name}.jsonl"
-    if path.exists():
-        return [Prediction.model_validate_json(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    print(f"running {name} on {len(dataset)} items ...", file=sys.stderr)
-    with ThreadPoolExecutor(workers) as pool:
-        preds = [p for chunk in pool.map(lambda x: run_judge(judge, [x], question), dataset) for p in chunk]
-    path.write_text("\n".join(p.model_dump_json() for p in preds), encoding="utf-8")
-    return preds
+    cache = ({p.id: p for p in map(Prediction.model_validate_json, path.read_text(encoding="utf-8").splitlines())}
+             if path.exists() else {})
+
+    def fresh(x: dict) -> bool:
+        p = cache.get(x["id"])
+        return bool(p and p.answer and (p.input_hash is None
+                                        or p.input_hash == JudgeRequest(state=x["state"], questions=[]).input_hash()))
+
+    todo = [x for x in dataset if not fresh(x)]
+    if todo:
+        print(f"running {name} on {len(todo)} of {len(dataset)} items ...", file=sys.stderr)
+        with ThreadPoolExecutor(workers) as pool:
+            for p in (p for chunk in pool.map(lambda x: run_judge(judge, [x], question), todo) for p in chunk):
+                cache[p.id] = p
+        path.write_text("\n".join(p.model_dump_json() for p in cache.values()), encoding="utf-8")
+    return [cache[x["id"]] for x in dataset]
 
 
 def main() -> None:

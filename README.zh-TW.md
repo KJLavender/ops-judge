@@ -15,6 +15,32 @@ RuleJudge（regex）─▶ JevJudge（System One 模型）─▶ LLMJudge ─▶
 - 每個決策都寫進 **SQLite 稽核紀錄**：輸入雜湊、各層答案、延遲、成本、走了哪條路。
 - 人工標註會回收成校準和訓練資料。
 
+## 它是什麼、不是什麼
+
+**ops-judge 是「判斷員」，不是「修復者」。** 它回答「這次 CI 失敗是程式錯、環境問題，還是偶發？該重跑、找人，還是交給修復 agent？」，但不會自己改程式或開 PR。
+
+| 角色 | 例子 | 負責什麼 |
+|---|---|---|
+| **判斷員**（本專案） | ops-judge | 便宜、可稽核地判斷失敗原因和處理方向 |
+| 工作流程框架 | GitHub Agentic Workflows | 何時啟動 AI、允許它做哪些動作 |
+| 修復者 | Copilot coding agent、自動修復 CI 的 agent | 讀錯誤、改程式、跑測試、開 PR |
+
+三者是搭配關係，不是競爭關係。分診先擋掉大多數「重跑就好」的失敗，修復 agent 才不會白白花成本去修根本沒壞的東西：
+
+```
+CI 失敗 ─▶ ops-judge 判斷原因與處理方向
+              ├─ 暫時性 ─▶ 自動重跑
+              ├─ 環境／基礎設施 ─▶ 通知平台團隊
+              ├─ 程式錯誤 ─▶ 交給修復 agent ─▶ 重跑測試、人工審查
+              └─ 不確定 ─▶ 人工佇列
+```
+
+**目前能做到哪裡**（誠實版）：
+
+- **已經有**：CI log 前處理、分層判斷、校準、稽核紀錄、人工佇列、評估工具，以及分析任何公開 GitHub Actions run 的命令（`ops-judge triage`）。
+- **還沒接上**：重跑、PR 留言、通知的決策邏輯已經寫好，但還沒有串接 GitHub 實際執行這些動作；告警降噪還在規劃；Jev 雲端版等待 API key。
+- 所以它現在是**可試用、有測試、有真實資料評估的判斷層**，不是已上線的自動修復 CI 機器人。
+
 ## 進度
 
 | 部分 | 狀態 |
@@ -24,13 +50,13 @@ RuleJudge（regex）─▶ JevJudge（System One 模型）─▶ LLMJudge ─▶
 | 校準（isotonic／Platt）與評估（閾值掃描、ECE、含錯誤相關性的 compare、learning curve） | 完成 |
 | CI 前處理：清理 log、擷取錯誤段落、堆疊與修改檔案交集、基礎設施／環境訊號、Drain3 模板 | 完成 |
 | CI 動作：重跑／留言／通知；fork PR 不自動重跑；重跑仍失敗時 flaky 改判 code_bug | 完成（只有邏輯，尚未接上 GitHub） |
-| 重跑標註收集＋真實資料評估（`collect_reruns.py`、`build_dataset.py`、`eval_reruns.py`） | 4 個 repo 共 220 筆失敗；LLM 加上 main 歷史 AUROC 0.74、本機 Kev-4B 0.69（見 `plans/01-ops-judge-plan.md` 第 11 節） |
+| 真實資料評估（`collect_reruns.py`、`collect_history.py`、`collect_context.py`、`build_dataset.py`、`eval_reruns.py`、`experiments.py`） | 8 個專案 316 筆失敗 → 180 題；全部重跑 77.2%、LLM 校準後 82.8%（把握 85% 以上才答時 90%）、本機 Kev-4B 80.6%（見 `plans/01-ops-judge-plan.md` 第 11.3 節） |
 | Jev 實測 | 等 API key（`TYPESAFE_API_KEY`） |
 | 告警流程（Alertmanager webhook、K8s + Chaos Mesh） | 規劃中（見 `plans/01-ops-judge-plan.md`） |
 
 ## Demo
 
-- **案例瀏覽頁**：**https://kjlavender.github.io/ops-judge/**（`docs/index.html`，不需要後端）：103 筆真實失敗，每一筆都能看到判斷器看到的事實、每個模型的機率、串接路徑，以及實際結果。用 `python scripts/build_site.py` 重新產生。
+- **案例瀏覽頁**：**https://kjlavender.github.io/ops-judge/**（`docs/index.html`，不需要後端）：180 筆真實失敗，每一筆都能看到判斷器看到的事實、每個模型的機率、串接路徑，以及實際結果。用 `python scripts/build_site.py` 重新產生。
 - **現場分析**任何公開 repo 的 GitHub Actions run：
 
 ```bash
@@ -45,7 +71,7 @@ ops-judge triage <run 網址> --no-history --json                         # 較�
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest                       # 38 個測試，不連網
+python -m pytest                       # 46 個測試，不連網
 python scripts/toy_eval.py             # 20 筆 CI 玩具資料 → examples/out/{sweep,calibration}.png、compare.json、audit.sqlite
 python scripts/collect_reruns.py owner/repo --pages 3   # 從 GitHub Actions 的重跑紀錄取得 flaky 標註（需要 gh 登入）
 ```

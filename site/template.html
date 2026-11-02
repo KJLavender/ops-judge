@@ -93,6 +93,9 @@
   .step .t { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
   .step.acc { border-color: var(--series-1); }
   .verdict { margin-top: 12px; font-size: 15px; }
+  .expgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+  .expgrid h3 { margin-top: 0; color: var(--text-primary); }
+  .expgrid p { font-size: 13px; color: var(--text-secondary); margin: 4px 0 10px; }
   #tip { position: fixed; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
          border-radius: 6px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; z-index: 9; }
   ul.notes { padding-left: 20px; } ul.notes li { margin: 4px 0; }
@@ -129,6 +132,9 @@
     <p class="muted" style="font-size:13px;margin-bottom:0" data-i18n="results_note"></p>
   </div>
 
+  <h2 data-i18n="h_exp"></h2>
+  <div id="exp"></div>
+
   <h2 data-i18n="h_cases"></h2>
   <p class="muted" data-i18n="cases_note"></p>
   <div class="explorer">
@@ -151,7 +157,7 @@
 <script>
 const DATA = /*__DATA__*/null;
 const S = DATA.summary, CASES = DATA.cases;
-const TRANSIENT = new Set(["flaky_test", "infrastructure"]);
+const TRANSIENT = new Set(["flaky_test", "infrastructure", "rerun_fixes_it"]);
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const pct = (x) => x == null ? "—" : (x * 100).toFixed(1) + "%";
@@ -160,7 +166,7 @@ const f3 = (x) => x == null || Number.isNaN(x) ? "—" : x.toFixed(3);
 const T = {
   en: {
     lead: "A calibrated, auditable judgment layer for CI failures: <b>should this failed job just be rerun, or does a human need to look?</b> Cheap deterministic rules and a small decision model answer first; only the gray zone escalates to an LLM, then to a person.",
-    t_cases: "real CI failures", t_repos: "public repos", t_best: "best AUROC (LLM + history)", t_cascade: "decided before the LLM",
+    t_cases: "real CI failures", t_repos: "public repos", t_best: "best calibrated accuracy · always rerun:", t_cascade: "decided before the LLM",
     h_how: "How it works",
     p: [["GitHub Actions failure", "run + failed job logs"], ["Preprocess", "cut post-job noise, ##[error] annotation, infra/env signals"],
         ["History facts", "pass rate on main, failures fixed by rerun, error seen before (past 14 days only)"],
@@ -169,9 +175,19 @@ const T = {
     how_note: "Every tier returns a probability distribution; per-policy thresholds decide whether to stop or escalate. flaky_test needs 0.85 (it triggers an automatic rerun), unknown always escalates, fork PRs are never auto-rerun. Every decision is written to a SQLite audit log.",
     h_results: "Results",
     results_q: "Task: at the moment a job fails, predict whether a plain rerun will fix it. Ground truth comes from what actually happened on GitHub (attempt 1 failed → a later attempt passed or not).",
-    m_method: "Method", m_acc: "Accuracy", m_auroc: "AUROC", m_ece: "ECE", m_lat: "p50 latency",
-    results_note: "AUROC 0.5 = guessing (dashed line). Blue = models, gray = non-model baselines. ECE = calibration error, lower is better. Gold labels are noisy: some jobs were hit by an AWS spot reclaim twice in a row.",
+    m_method: "Method", m_acc: "Accuracy", m_acc_cal: "Calibrated", m_auroc: "AUROC", m_ece: "ECE", m_lat: "p50 latency",
+    results_note: "AUROC 0.5 = guessing (dashed line). Blue = models, gray = non-model baselines. “Calibrated” = accuracy after fixing “how sure” on known outcomes, checked on cases the fix never saw. ECE = calibration error, lower is better. Kev-4B ran on CPU here (the GPU was busy), so its latency is not comparable.",
     h_cases: "Case explorer",
+    h_exp: "Improvements tried",
+    x_sel: "1 · Answer only when sure", x_sel_p: "The model (LLM, all facts, calibrated) only answers when it is at least this sure; everything else goes to a person.",
+    x_th: "Must be at least", x_ans: "Answers", x_acc: "Correct",
+    x_cal: "2 · Make “how sure” honest (calibration)", x_cal_p: "Calibration error: when a model says “80% sure”, how far is it from being right 80% of the time? Fixed with known answers, checked on cases the fix never saw (5-fold).",
+    x_model: "Model", x_before: "Before", x_after: "After",
+    x_cost: "3 · Decide by cost, not accuracy", x_cost_p: "Minutes spent on all failures. A rerun costs ~1 min; a person investigating costs the minutes below; a useless rerun delays the person by 5 min.",
+    x_hc: "Person needs (min)", x_human: "Always ask a person", x_rerun: "Always rerun", x_ours: "Model decides", x_best: "Perfect knowledge",
+    x_agree: "5 · Two models must agree", x_agree_p: "Decide only when the decision model and the LLM are both sure and agree; otherwise ask a person.",
+    x_pair: "Pair", x_dec: "Decided", x_clean: "6 · More data, cleaner answers", x_clean_p: "Cases from 8 repos. Labels are per job: 20 cases first marked “rerun did not help” had actually passed on rerun (a sibling job kept the run red) and were corrected.",
+    x_repo: "Repo", x_n: "Cases", x_base: "Always guess the majority",
     cases_note: "Every case is a real failed job. The decision is made from the facts below only; the outcome is revealed afterwards.",
     search: "Search error text, repo, job…",
     f_all: "All", f_wrong: "Cascade wrong", f_queued: "Sent to human", f_tr: "Rerun fixed it", f_pe: "Rerun did not help",
@@ -182,19 +198,21 @@ const T = {
     open_gh: "open on GitHub ↗", fork: "fork PR", transient_hint: "↻ = a rerun would fix it",
     h_learned: "What I learned",
     learned: [
-      "<b>“Rerun passed” ≠ “flaky test”.</b> 71 of 220 failures were AWS spot-instance reclaims (infrastructure). The label is really “transient vs persistent”, so that is what is scored.",
+      "<b>Label per job, not per run.</b> A run can keep failing because of one job while another job passed on rerun. Labelling by run mislabelled 20 cases; labelling by the job’s own last attempt fixed it, and every model’s score went up.",
+      "<b>“Rerun passed” ≠ “flaky test”.</b> Many failures were AWS spot-instance reclaims (infrastructure). The question is really “transient vs persistent”, so that is what is scored.",
       "<b>Preprocessing decides the outcome.</b> Post-job cleanup output (sanitizer reports, cache saves) buried the real error; cutting at the failed step and preferring GitHub’s <code>##[error]</code> annotation shrank the excerpt from 121 to 46 lines.",
-      "<b>Real logs break naive signals.</b> “timeout” matched config names like <code>sticky_wait_timeout</code>; exit code 137 is SIGKILL, not necessarily OOM.",
-      "<b>No leakage.</b> The rerun result is the label, so it is never an input; history only counts runs before the failure.",
-      "<b>The LLM’s value is reading the error text.</b> A logistic regression on the same structured facts scores AUROC 0.51 (chance); the LLM 0.74.",
-      "<b>Small decision models are conservative.</b> Kev-4B answered “unknown” 69% of the time, but every answer it gave with ≥0.6 confidence was right (clear infra/env failures). It saved only 8% of LLM calls here.",
-      "<b>Honest bottom line:</b> the best method beats “always rerun” by ~7 points on 103 cases dominated by one repo. The infrastructure (calibrated cascade, audit log, evaluation harness) is the reusable part; the next lever is better facts, not a bigger model."],
-    footer: "Data: public GitHub Actions runs from sveltejs/kit, apache/airflow, python/cpython, astral-sh/ruff (logs as published by GitHub). Built with scripts/build_site.py.",
+      "<b>No leakage.</b> The rerun result is the label, so it is never an input; history, other branches and incidents only count evidence from before the failure.",
+      "<b>Calibration was the biggest win.</b> Fitting “how sure” on known outcomes (checked on cases the fit never saw) cut calibration error from 0.18 to 0.06 and lifted the LLM from 67% to 83%; the small Kev-4B reached 81%.",
+      "<b>Answer only when sure:</b> above 85% confidence the LLM answers 48% of failures and is right 90% of the time; the rest go to a person.",
+      "<b>Several ideas did not work, and that is reported:</b> extra context facts (failing test history, other branches, GitHub incidents, changed lines) moved AUROC only 0.72 → 0.73; splitting the question into two yes/no questions made both models worse.",
+      "<b>Cost changes the picture.</b> If a person needs 15 minutes per failure, “always rerun” is already close to optimal and the model saves ~4%; at 5 minutes it saves ~12%. The model helps most where failures are mixed (airflow, sveltejs/kit, ruff) and adds nothing where almost everything is transient (deno, vue).",
+    ],
+    footer: "Data: public GitHub Actions runs from 8 repos — apache/airflow, denoland/deno, sveltejs/kit, vuejs/core, python/cpython, astral-sh/ruff, microsoft/TypeScript, huggingface/transformers (logs as published by GitHub). Built with scripts/build_site.py.",
     tier: {rule: "Rule", kev: "Kev-4B", llm: "LLM", human: "Human"},
   },
   zh: {
     lead: "給 CI 失敗用的判斷層，信心經過校準、每次決策都可稽核：<b>這個失敗的 job 重跑就好，還是需要人看？</b>先用便宜的確定性規則和小型 decision model 判斷，只有灰色地帶才交給 LLM，最後才交給人。",
-    t_cases: "筆真實 CI 失敗", t_repos: "個公開 repo", t_best: "最佳 AUROC（LLM＋歷史）", t_cascade: "在 LLM 之前就判定",
+    t_cases: "筆真實 CI 失敗", t_repos: "個公開 repo", t_best: "最佳修正後準確率・全部重跑：", t_cascade: "在 LLM 之前就判定",
     h_how: "運作方式",
     p: [["GitHub Actions 失敗", "run＋失敗 job 的 log"], ["前處理", "截掉 cleanup 雜訊、取 ##[error] 標註、基礎設施／環境訊號"],
         ["歷史事實", "main 成功率、被重跑救回的次數、錯誤是否出現過（只看過去 14 天）"],
@@ -203,9 +221,19 @@ const T = {
     how_note: "每一層都回傳機率分布，由各 policy 的閾值決定停下或往上送。flaky_test 要 0.85（因為會觸發自動重跑），unknown 一律往上送，fork PR 永遠不自動重跑。每個決策都寫進 SQLite 稽核紀錄。",
     h_results: "結果",
     results_q: "任務：在 job 失敗的當下，預測「直接重跑能不能解決」。標準答案來自 GitHub 上實際發生的事（第 1 次失敗 → 之後的重跑有沒有通過）。",
-    m_method: "方法", m_acc: "準確率", m_auroc: "AUROC", m_ece: "ECE", m_lat: "p50 延遲",
-    results_note: "AUROC 0.5 等於瞎猜（虛線）。藍色是模型，灰色是不用模型的對照組。ECE 是校準誤差，越低越好。標籤有雜訊：有些 job 連續兩次被 AWS 回收 Spot 機器。",
+    m_method: "方法", m_acc: "準確率", m_acc_cal: "修正後", m_auroc: "AUROC", m_ece: "ECE", m_lat: "p50 延遲",
+    results_note: "AUROC 0.5 等於瞎猜（虛線）。藍色是模型，灰色是不用模型的對照組。「修正後」是用已知答案修正「幾成把握」後的準確率，並用修正時沒看過的題目檢查。ECE 是校準誤差，越低越好。Kev-4B 這次因為 GPU 被佔用而改用 CPU 跑，所以延遲不能直接比較。",
     h_cases: "案例瀏覽",
+    h_exp: "改進實驗",
+    x_sel: "1・有把握才回答", x_sel_p: "模型（LLM、全部線索、修正過把握程度）只在把握至少到這個程度時才回答，其餘交給人。",
+    x_th: "把握至少", x_ans: "回答題數", x_acc: "答對率",
+    x_cal: "2・讓「幾成把握」變可信（校準）", x_cal_p: "校準誤差：模型說「八成把握」時，實際上離「八成會對」差多少。用已知答案修正，再拿修正時沒看過的題目檢查（5-fold）。",
+    x_model: "模型", x_before: "修正前", x_after: "修正後",
+    x_cost: "3・用代價決定，而不是正確率", x_cost_p: "處理全部失敗總共花多少分鐘。重跑一次約 1 分鐘；人工查一次的分鐘數如下；白重跑會讓人晚 5 分鐘開始查。",
+    x_hc: "人工查一次（分鐘）", x_human: "全部交給人", x_rerun: "全部直接重跑", x_ours: "模型決定", x_best: "完美預知",
+    x_agree: "5・兩個模型意見一致才判", x_agree_p: "只有 decision model 和 LLM 都有把握、而且意見一致時才自己判，否則交給人。",
+    x_pair: "組合", x_dec: "自己判了", x_clean: "6・更多題目、更乾淨的答案", x_clean_p: "題目來自 8 個專案。答案以單一 job 為準：有 20 題原本標成「重跑也沒用」，其實這個 job 重跑就好了（是同一個 run 裡別的 job 還在失敗），已經改正。",
+    x_repo: "專案", x_n: "題數", x_base: "全部猜多數那一邊",
     cases_note: "每一筆都是真實失敗的 job。判斷只根據下面的事實，實際結果在判斷之後才揭曉。",
     search: "搜尋錯誤訊息、repo、job…",
     f_all: "全部", f_wrong: "串接判錯", f_queued: "交給人工", f_tr: "重跑有救回", f_pe: "重跑沒用",
@@ -216,14 +244,16 @@ const T = {
     open_gh: "在 GitHub 開啟 ↗", fork: "fork PR", transient_hint: "↻ = 重跑就會好",
     h_learned: "學到的事",
     learned: [
-      "<b>「重跑後通過」不等於「flaky test」。</b>220 筆裡有 71 筆是 AWS Spot 機器被回收（基礎設施問題）。標籤的真實意義是「暫時性 vs 持續性」，所以評分也照這個來。",
-      "<b>前處理決定結果。</b>失敗之後的 cleanup 輸出（sanitizer 報告、cache 儲存）把真正的錯誤擠掉了；在失敗步驟截斷、優先採用 GitHub 的 <code>##[error]</code> 標註後，錯誤段落從 121 行降到 46 行。",
-      "<b>真實 log 會打壞天真的規則。</b>「timeout」會誤中 <code>sticky_wait_timeout</code> 這類設定名稱；exit code 137 是 SIGKILL，不一定是記憶體不足。",
-      "<b>不洩漏答案。</b>重跑結果就是標籤，所以絕不當輸入；歷史只算失敗之前的 run。",
-      "<b>LLM 的價值在讀懂錯誤文字。</b>同一組結構化事實丟給 logistic regression，AUROC 只有 0.51（瞎猜）；LLM 是 0.74。",
-      "<b>小型 decision model 很保守。</b>Kev-4B 有 69% 回答「unknown」，但它信心 ≥0.6 的答案全對（明確的 infra／環境問題）。在這批資料上只省下 8% 的 LLM 呼叫。",
-      "<b>誠實的結論：</b>最好的方法也只比「永遠重跑」高約 7 個百分點，而且只有 103 筆、多數來自同一個 repo。可重用的是基礎建設（校準過的串接、稽核紀錄、評估工具）；下一步該補的是更好的事實，而不是更大的模型。"],
-    footer: "資料：sveltejs/kit、apache/airflow、python/cpython、astral-sh/ruff 的公開 GitHub Actions run（log 為 GitHub 公開內容）。由 scripts/build_site.py 產生。",
+      "<b>答案要看單一 job，不能看整個 run。</b>一個 run 可能因為某個 job 一直失敗，而另一個 job 其實重跑就好了。原本用 run 來標，標錯了 20 題；改看這個 job 自己最後一次的結果後，所有模型的分數都上升。",
+      "<b>「重跑後通過」不等於「flaky test」。</b>很多失敗其實是 AWS Spot 機器被回收（基礎設施問題）。問題的本質是「暫時性 vs 持續性」，所以評分也照這個來。",
+      "<b>前處理決定結果。</b>失敗之後的 cleanup 輸出把真正的錯誤擠掉了；在失敗步驟截斷、優先採用 GitHub 的 <code>##[error]</code> 標註後，錯誤段落從 121 行降到 46 行。",
+      "<b>不洩漏答案。</b>重跑結果就是答案，所以絕不當輸入；歷史、其他分支、GitHub 故障都只看失敗之前的資料。",
+      "<b>最大的進步來自「校準」。</b>用已知答案修正「幾成把握」（再用修正時沒看過的題目檢查），校準誤差從 0.18 降到 0.06，LLM 從 67 分變成 83 分；小模型 Kev-4B 也到 81 分。",
+      "<b>有把握才回答：</b>把握 85% 以上時，LLM 回答了 48% 的失敗，答對 90%；其餘交給人。",
+      "<b>有些點子沒用，也照實寫出來：</b>額外的線索（失敗測試的歷史、其他分支、GitHub 故障、修改的程式行）只讓 AUROC 從 0.72 變 0.73；把問題拆成兩個是非題，兩個模型都變差。",
+      "<b>算成本之後，結論會變。</b>如果工程師查一次要 15 分鐘，「全部直接重跑」已經接近最佳，模型只省約 4%；查一次 5 分鐘時省約 12%。模型在失敗原因多元的專案（airflow、sveltejs/kit、ruff）最有幫助，在幾乎都是重跑就好的專案（deno、vue）則沒有加分。",
+    ],
+    footer: "資料：8 個專案的公開 GitHub Actions run：apache/airflow、denoland/deno、sveltejs/kit、vuejs/core、python/cpython、astral-sh/ruff、microsoft/TypeScript、huggingface/transformers（log 為 GitHub 公開內容）。由 scripts/build_site.py 產生。",
     tier: {rule: "規則", kev: "Kev-4B", llm: "LLM", human: "人工"},
   },
 };
@@ -237,9 +267,10 @@ function renderStatic() {
   document.querySelectorAll("[data-lang]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.lang === lang));
   $("#q").placeholder = t.search;
 
-  const best = Math.max(...S.methods.filter((m) => m.kind === "model").map((m) => m.auroc || 0));
+  const X = S.experiments;
+  const bestCal = X ? Math.max(...Object.values(X.models).map((m) => m.calibrated.accuracy)) : null;
   const early = S.cascade.tiers.rule + S.cascade.tiers.kev;
-  $("#tiles").innerHTML = [[S.n_raw + " → " + S.n, t.t_cases], [S.repos.length, t.t_repos], [best.toFixed(2), t.t_best],
+  $("#tiles").innerHTML = [[S.n_raw + " → " + S.n, t.t_cases], [S.repos.length, t.t_repos], [pct(bestCal), `${t.t_best} ${X ? pct(X.majority.all) : "—"}`],
     [pct(early / S.n), t.t_cascade]].map(([v, k]) => `<div class="card tile"><div class="v">${v}</div><div class="k">${k}</div></div>`).join("");
 
   $("#pipeline").innerHTML = t.p.map(([a, b], i) => (i ? '<span class="arrow">→</span>' : "") +
@@ -250,10 +281,10 @@ function renderStatic() {
     const bar = m.auroc == null ? `<span class="muted">—</span>` :
       `<div class="hbar" data-tip="${esc(m.name)}: AUROC ${f3(m.auroc)}"><div class="fill ${m.kind === "baseline" ? "base" : ""}" style="width:${w}%"></div><div class="chance" style="left:50%"></div></div>`;
     return `<tr><td>${esc(m.name)}${m.note ? `<div class="muted" style="font-size:12px">${esc(m.note)}</div>` : ""}</td>
-      <td class="num">${pct(m.accuracy)}</td><td class="num">${f3(m.auroc)}</td><td class="barcell">${bar}</td>
+      <td class="num">${pct(m.accuracy)}</td><td class="num">${m.accuracy_calibrated == null ? "—" : pct(m.accuracy_calibrated)}</td><td class="num">${f3(m.auroc)}</td><td class="barcell">${bar}</td>
       <td class="num">${m.ece == null ? "—" : f3(m.ece)}</td><td class="num">${m.latency_ms == null ? "—" : (m.latency_ms / 1000).toFixed(1) + " s"}</td></tr>`;
   }).join("");
-  $("#methods").innerHTML = `<thead><tr><th>${t.m_method}</th><th class="num">${t.m_acc}</th><th class="num">${t.m_auroc}</th><th></th><th class="num">${t.m_ece}</th><th class="num">${t.m_lat}</th></tr></thead><tbody>${rows}</tbody>`;
+  $("#methods").innerHTML = `<thead><tr><th>${t.m_method}</th><th class="num">${t.m_acc}</th><th class="num">${t.m_acc_cal}</th><th class="num">${t.m_auroc}</th><th></th><th class="num">${t.m_ece}</th><th class="num">${t.m_lat}</th></tr></thead><tbody>${rows}</tbody>`;
 
   const fs = [["all", t.f_all], ["wrong", t.f_wrong], ["queued", t.f_queued], ["transient", t.f_tr], ["persistent", t.f_pe]];
   $("#filters").querySelectorAll("button").forEach((b) => b.remove());
@@ -265,7 +296,27 @@ function renderStatic() {
     $("#filters").appendChild(b);
   });
   $("#learned").innerHTML = t.learned.map((x) => `<li>${x}</li>`).join("");
-  renderList(); renderDetail();
+  renderExperiments(); renderList(); renderDetail();
+}
+
+function renderExperiments() {
+  const X = S.experiments, t = T[lang];
+  if (!X) { $("#exp").innerHTML = ""; return; }
+  const M = X.models, best = M.llm || Object.values(M)[0];
+  const row = (cells) => `<tr>${cells.map((c, i) => `<td class="${i ? "num" : ""}">${c}</td>`).join("")}</tr>`;
+  const head = (cells) => `<thead><tr>${cells.map((c, i) => `<th class="${i ? "num" : ""}">${c}</th>`).join("")}</tr></thead>`;
+  const sel = best.selective.map((r) => row([Math.round(r.threshold * 100) + "%", `${r.answered} (${pct(r.coverage)})`, pct(r.accuracy)])).join("");
+  const cal = Object.entries(M).map(([k, m]) => row([esc(k), f3(m.raw.ece), f3(m.calibrated.ece)])).join("");
+  const cost = Object.entries(best.cost_sensitivity).map(([h, c]) => row([h, Math.round(c.always_human), Math.round(c.always_rerun), Math.round(c.model), Math.round(c.oracle)])).join("");
+  const agree = Object.entries(X.agreement || {}).map(([k, v]) => row([esc(k), `${v.decided} (${pct(v.coverage)})`, pct(v.accuracy)])).join("");
+  const repos = Object.entries(best.by_repo).map(([r, v]) => row([esc(r), v.n, pct(v.majority), pct(v.accuracy)])).join("");
+  $("#exp").innerHTML = `<div class="expgrid">
+    <div class="card"><h3>${t.x_sel}</h3><p>${t.x_sel_p}</p><table>${head([t.x_th, t.x_ans, t.x_acc])}<tbody>${sel}</tbody></table></div>
+    <div class="card"><h3>${t.x_cal}</h3><p>${t.x_cal_p}</p><table>${head([t.x_model, t.x_before, t.x_after])}<tbody>${cal}</tbody></table></div>
+    <div class="card"><h3>${t.x_cost}</h3><p>${t.x_cost_p}</p><table>${head([t.x_hc, t.x_human, t.x_rerun, t.x_ours, t.x_best])}<tbody>${cost}</tbody></table></div>
+    ${agree ? `<div class="card"><h3>${t.x_agree}</h3><p>${t.x_agree_p}</p><table>${head([t.x_pair, t.x_dec, t.x_acc])}<tbody>${agree}</tbody></table></div>` : ""}
+    <div class="card"><h3>${t.x_clean}</h3><p>${t.x_clean_p} (${X.n_clean}/${X.n})</p><table>${head([t.x_repo, t.x_n, t.x_base, t.x_acc])}<tbody>${repos}</tbody></table></div>
+  </div>`;
 }
 
 function match(c, k) {

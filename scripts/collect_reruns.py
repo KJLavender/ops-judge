@@ -3,6 +3,9 @@
 Same commit, attempt 1 failed, a later attempt succeeded  -> label "flaky"
 Every attempt failed                                      -> label "persistent_failure" (refine by hand later)
 
+These labels are per RUN. A run can keep failing because of one job while another job passed on rerun;
+build_dataset.py relabels per JOB using that job's last attempt (collect_context.py fetches it).
+
 Usage:
   python scripts/collect_reruns.py owner/repo [owner/repo ...] --pages 5 --out data/reruns.jsonl
 Needs an authenticated `gh` CLI. Logs older than the repo's retention (default 90 days) are gone.

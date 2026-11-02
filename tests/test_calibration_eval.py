@@ -71,3 +71,25 @@ def test_rule_of_three_and_calibration_summary():
     c = calibration(preds([0.9, 0.2, 0.8, 0.1]), golds)
     assert c["n"] == 4 and 0 <= c["ece"] <= 1
     assert fit_calibrator(preds([0.9, 0.2, 0.8, 0.1]), golds)(0.85) > 0.5
+
+
+def test_prediction_cache_rejudges_only_changed_inputs(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import toy_eval
+    from conftest import FakeJudge
+    from judge_core.types import Question
+
+    monkeypatch.setattr(toy_eval, "OUT", tmp_path)
+    q = Question(key="q", kind="noul", instructions="?")
+    judge = FakeJudge("j", {"q": Answer.noul(0.9)})
+    data = [{"id": "a", "state": {"x": 1}}, {"id": "b", "state": {"x": 2}}]
+    toy_eval.cached_preds("t", judge, data, q, workers=1)
+    assert len(judge.requests) == 2
+    toy_eval.cached_preds("t", judge, data, q, workers=1)
+    assert len(judge.requests) == 2  # nothing changed: all cached
+    data[1]["state"] = {"x": 3}
+    data.append({"id": "c", "state": {"x": 4}})
+    out = toy_eval.cached_preds("t", judge, data, q, workers=1)
+    assert len(judge.requests) == 4 and [p.id for p in out] == ["a", "b", "c"]  # changed b + new c only
