@@ -5,3 +5,11 @@ data/
 examples/out/
 *.sqlite
 *.egg-info/
+
+# planning notes stay local
+PLAN.md
+PLANS.md
+plan.md
+*-plan.md
+*_plan.md
+plans/
